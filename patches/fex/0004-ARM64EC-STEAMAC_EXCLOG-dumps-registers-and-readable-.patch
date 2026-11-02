@@ -1,0 +1,150 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: jason chien <3936511+jason5545@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 20:09:56 +0800
+Subject: [PATCH 4/6] ARM64EC: STEAMAC_EXCLOG dumps registers and readable
+ strings at the first access violations in the main executable
+
+For MSFS 2024's main thread reading NULL during Xbox sign-in on Wine's ARM64EC: all GPRs, then the readable ASCII and
+UTF-16 strings on the stack and behind each register. Anything that could carry a credential (a run of 32+ base64
+characters, or words like token/ticket/XBL3/eyJ) is masked.
+---
+ Source/Windows/ARM64EC/Module.cpp | 119 ++++++++++++++++++++++++++++++
+ 1 file changed, 119 insertions(+)
+
+diff --git a/Source/Windows/ARM64EC/Module.cpp b/Source/Windows/ARM64EC/Module.cpp
+index de4c29f39..6dd67b5d2 100644
+--- a/Source/Windows/ARM64EC/Module.cpp
++++ b/Source/Windows/ARM64EC/Module.cpp
+@@ -792,6 +792,120 @@ void Walk(const CONTEXT* Guest) {
+   }
+   WineDbgOut(fextl::fmt::format("steamacwalk {:04x} slots base={:x}{}\n", GetCurrentThreadId(), StackBase, Slots).c_str());
+ }
++
++// For the first few access violations in the main executable: all general purpose registers, then the readable
++// strings on the stack and behind each register, to see what the faulting code was working on. Token-like strings
++// (long base64/JWT runs) are masked.
++int DumpsLeft = 3;
++
++bool Readable(uint64_t Address, size_t Size) {
++  MEMORY_BASIC_INFORMATION Info {};
++  if (!Address || !::VirtualQuery(reinterpret_cast<void*>(Address), &Info, sizeof(Info))) {
++    return false;
++  }
++  if (Info.State != MEM_COMMIT || (Info.Protect & (PAGE_GUARD | PAGE_NOACCESS)) || !(Info.Protect & 0xEE)) {
++    return false;
++  }
++  return Address + Size <= reinterpret_cast<uint64_t>(Info.BaseAddress) + Info.RegionSize;
++}
++
++void AppendStrings(fextl::string& Out, const uint8_t* Data, size_t Size, uint64_t Base, int& Budget) {
++  const auto Emit = [&](size_t Start, const fextl::string& Text) {
++    if (Budget <= 0) {
++      return;
++    }
++    // Mask anything that could carry a credential: a run of 32+ base64/JWT characters, or a marker word.
++    bool TokenLike = false;
++    size_t Run = 0;
++    for (char C : Text) {
++      const bool B64 = (C >= 'A' && C <= 'Z') || (C >= 'a' && C <= 'z') || (C >= '0' && C <= '9') || C == '+' || C == '/' || C == '=' ||
++                       C == '-' || C == '_' || C == '.';
++      Run = B64 ? Run + 1 : 0;
++      if (Run >= 32) {
++        TokenLike = true;
++      }
++    }
++    fextl::string Lower = Text;
++    for (auto& C : Lower) {
++      if (C >= 'A' && C <= 'Z') {
++        C = static_cast<char>(C - 'A' + 'a');
++      }
++    }
++    for (const char* Marker : {"eyj", "xbl3", "bearer", "token", "ticket", "password", "secret", "signature"}) {
++      if (Lower.find(Marker) != fextl::string::npos) {
++        TokenLike = true;
++      }
++    }
++    Out += fextl::fmt::format(" {:x}:\"{}\"", Base + Start, TokenLike ? fextl::fmt::format("<masked {}>", Text.size()) : Text.substr(0, 100));
++    --Budget;
++  };
++  // ASCII
++  for (size_t I = 0; I < Size;) {
++    size_t J = I;
++    while (J < Size && Data[J] >= 0x20 && Data[J] < 0x7f) {
++      ++J;
++    }
++    if (J - I >= 6) {
++      Emit(I, fextl::string(reinterpret_cast<const char*>(Data + I), J - I));
++    }
++    I = J + 1;
++  }
++  // UTF-16LE (ASCII range only)
++  for (size_t I = 0; I + 1 < Size;) {
++    size_t J = I;
++    fextl::string Text;
++    while (J + 1 < Size && Data[J + 1] == 0 && Data[J] >= 0x20 && Data[J] < 0x7f) {
++      Text += static_cast<char>(Data[J]);
++      J += 2;
++    }
++    if (Text.size() >= 6) {
++      Emit(I, "u:" + Text);
++    }
++    I = J > I ? J : I + 2;
++  }
++}
++
++void Dump(const CONTEXT* Guest) {
++  WineDbgOut(fextl::fmt::format("steamacdump {:04x} rip={:x} rax={:x} rbx={:x} rcx={:x} rdx={:x} rsi={:x} rdi={:x} rbp={:x} rsp={:x} r8={:x} "
++                                "r9={:x} r10={:x} r11={:x} r12={:x} r13={:x} r14={:x} r15={:x}\n",
++                                GetCurrentThreadId(), Guest->Rip, Guest->Rax, Guest->Rbx, Guest->Rcx, Guest->Rdx, Guest->Rsi, Guest->Rdi,
++                                Guest->Rbp, Guest->Rsp, Guest->R8, Guest->R9, Guest->R10, Guest->R11, Guest->R12, Guest->R13, Guest->R14,
++                                Guest->R15)
++               .c_str());
++
++  const auto Teb = reinterpret_cast<uintptr_t>(NtCurrentTeb());
++  const uint64_t StackBase = *reinterpret_cast<const uint64_t*>(Teb + 0x8);
++  uint64_t End = Guest->Rsp + 0x3000;
++  if (End > StackBase) {
++    End = StackBase;
++  }
++  if (Guest->Rsp < End) {
++    fextl::string Out;
++    int Budget = 60;
++    AppendStrings(Out, reinterpret_cast<const uint8_t*>(Guest->Rsp), End - Guest->Rsp, Guest->Rsp, Budget);
++    WineDbgOut(fextl::fmt::format("steamacdump {:04x} stack-strings{}\n", GetCurrentThreadId(), Out).c_str());
++  }
++
++  const struct {
++    const char* Name;
++    uint64_t Value;
++  } Regs[] = {{"rax", Guest->Rax}, {"rbx", Guest->Rbx}, {"rcx", Guest->Rcx}, {"rdx", Guest->Rdx}, {"rsi", Guest->Rsi},
++              {"rdi", Guest->Rdi}, {"rbp", Guest->Rbp}, {"r8", Guest->R8},   {"r9", Guest->R9},   {"r10", Guest->R10},
++              {"r11", Guest->R11}, {"r12", Guest->R12}, {"r13", Guest->R13}, {"r14", Guest->R14}, {"r15", Guest->R15}};
++  for (const auto& Reg : Regs) {
++    if (!Readable(Reg.Value, 0x100)) {
++      continue;
++    }
++    const auto* Data = reinterpret_cast<const uint8_t*>(Reg.Value);
++    fextl::string Out;
++    int Budget = 8;
++    AppendStrings(Out, Data, 0x100, Reg.Value, Budget);
++    uint64_t Q[4];
++    memcpy(Q, Data, sizeof(Q));
++    WineDbgOut(fextl::fmt::format("steamacdump {:04x} *{} = {:x} {:x} {:x} {:x}{}\n", GetCurrentThreadId(), Reg.Name, Q[0], Q[1], Q[2], Q[3], Out)
++                 .c_str());
++  }
++}
+ } // namespace ExceptionLog
+ 
+ namespace Exception {
+@@ -1266,6 +1380,11 @@ bool ResetToConsistentStateImpl(const ThreadCPUArea CPUArea, EXCEPTION_RECORD* E
+   if (!IsJIT && !IsDispatcherAddress(NativeContext->Pc)) {
+     LogMan::Msg::DFmt("Passing through exception");
+     ExceptionLog::Log("pass", Exception, GuestContext, NativeContext);
++    if (ExceptionLog::Enabled && Exception->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && ExceptionLog::DumpsLeft > 0 &&
++        GuestContext->Rip >= 0x140000000ULL && GuestContext->Rip < 0x160000000ULL) {
++      --ExceptionLog::DumpsLeft;
++      ExceptionLog::Dump(GuestContext);
++    }
+     if (ExceptionLog::Enabled && Exception->ExceptionCode != EXCEPTION_SINGLE_STEP && ExceptionLog::WalksLeft > 0) {
+       --ExceptionLog::WalksLeft;
+       ExceptionLog::Walk(GuestContext);

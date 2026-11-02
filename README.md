@@ -27,7 +27,7 @@ NOTPROTON_STEAMAC=1 NOTPROTON_RUNNER_VARIANT=steamacfex+steamackk+steamacadv+ste
 
 | variant | 換掉什麼 | 來源 |
 |---|---|---|
-| `steamacfex` | `xtajit64.dll`（FEX ARM64EC） | 上游 FEX `02e24ca5c` 加上 x86 硬體除錯暫存器、RF 旗標、SMC 熱頁的修改（patch 還沒公開，見下方） |
+| `steamacfex` | `xtajit64.dll`（FEX ARM64EC） | 上游 FEX `02e24ca5c` 加 `patches/fex/` 六個 patch（x86 執行斷點、例外紀錄、RF 修正、SMC 熱頁） |
 | `steamackk` | Vulkan loader 1.4.363，接 KosmicKrisp | Mesa `ce576c29` 加 fxgl/steamac v1.9.7 的 KosmicKrisp patch，`tools/kk-build/` |
 | `steamacadv` | `advapi32.dll` | 上游 Wine 11.17 加 `patches/wine/advapi32-steamac.patch`，`tools/wine-advapi32/` |
 | `steamacvproc` | `msvproc.dll` | 上游 Wine 11.17 加 `patches/wine/msvproc-arm64ec-yuv2rgb.patch`，`tools/wine-msvproc/` |
@@ -61,9 +61,16 @@ D3D 這層靠 NotProton 的外掛（`NOTPROTON_STEAMAC=1`，設定在 [`config/n
 - 載入中有一段會反覆命中四個斷點約 700 輪，每輪都牽涉自我修改程式碼（SMC）。ARM64EC 的 FEX 每次 SMC 都要走一次頁故障，一輪約 0.8 秒，整段要 9 分鐘左右。
 - 把在 Linux 版 FEX 做過的「熱頁」（同一頁故障太多次就改成逐指令檢查）搬到 ARM64EC 之後，698 輪 85.8 秒跑完。`tools/smc-test/` 量單次 SMC 的成本。
 
-## FEX 的修改還沒公開
+## FEX 的修改
 
-FEX 上游的 `CONTRIBUTING.md` 寫明不收 AI 產生的程式碼。這裡的 FEX 修改是 AI 協助寫的，只在本機用，不送上游；要不要在這裡公開 patch 還沒決定。
+`patches/fex/` 是 FEX 的六個 patch，依序套在上游 main `02e24ca5c`，結果等於 fork 分支 `steamac-darwin` 的 `c33b6a5e9`（`git apply` 驗過，檔案樹相同）。
+
+- 0001：x86 執行斷點。CrossOver 27 Preview 的 ntdll 是閉源的，它把 x64 context 轉成 ARM64 時會丟掉除錯暫存器，所以這個 patch 在執行期 detour ntdll 的 ARM64EC `NtSetContextThread`／`NtGetContextThread`，DR0–DR7 改存在 FEX 的執行緒狀態。這是在「不碰閉源二進位」原則定下之前做的，保留沿用，之後不再擴大這種做法。
+- 0002–0004：`STEAMAC_EXCLOG=1` 時記錄交給遊戲的例外，只用來除錯。
+- 0005：例外處理改了 RIP 之後清掉 RF 記號。
+- 0006：SMC 熱頁。
+
+這些 patch 是 AI 協助寫的。FEX 上游的 `CONTRIBUTING.md` 寫明不收 AI 產生的程式碼，所以只放在這裡，不送上游。編法見 `patches/README.md`。
 
 ## 工具
 

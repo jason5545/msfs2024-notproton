@@ -1,0 +1,83 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: jason chien <3936511+jason5545@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 19:18:37 +0800
+Subject: [PATCH 2/6] ARM64EC: STEAMAC_EXCLOG=1 logs every exception handed to
+ the guest, with TEB stack bounds
+
+Diagnostics for MSFS 2024 losing its main thread to a stack overflow during Xbox sign-in on Wine's ARM64EC.
+One line per exception through __wine_dbg_output; exceptions FEX handles itself (SMC, JIT guard pages, suspend)
+are not logged. Off unless the environment variable is set.
+---
+ Source/Windows/ARM64EC/Module.cpp | 38 +++++++++++++++++++++++++++++++
+ 1 file changed, 38 insertions(+)
+
+diff --git a/Source/Windows/ARM64EC/Module.cpp b/Source/Windows/ARM64EC/Module.cpp
+index 4d8cf7e60..2bd8e80d6 100644
+--- a/Source/Windows/ARM64EC/Module.cpp
++++ b/Source/Windows/ARM64EC/Module.cpp
+@@ -654,6 +654,41 @@ namespace DebugRegisters {
+ } // namespace DebugRegisters
+ } // namespace
+ 
++// steamac diagnostics: with STEAMAC_EXCLOG=1, every exception that is handed on to the guest's handlers is logged as
++// one line through __wine_dbg_output, with the TEB stack bounds. Exceptions FEX handles itself (SMC, JIT guard pages,
++// suspend) are not logged. Meant for finding which exception recurses until a thread runs out of stack.
++namespace ExceptionLog {
++bool Enabled {};
++void (*WineDbgOut)(const char*) {};
++
++void Init() {
++  const char* Value = getenv("STEAMAC_EXCLOG");
++  if (!Value || Value[0] != '1') {
++    return;
++  }
++  WineDbgOut = reinterpret_cast<decltype(WineDbgOut)>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "__wine_dbg_output"));
++  Enabled = WineDbgOut != nullptr;
++}
++
++void Log(const char* What, const EXCEPTION_RECORD* Rec, const CONTEXT* Guest, const ARM64_NT_CONTEXT* Native) {
++  if (!Enabled) {
++    return;
++  }
++  // x64 TEB: NT_TIB.StackBase 0x8, NT_TIB.StackLimit 0x10, DeallocationStack 0x1478.
++  const auto Teb = reinterpret_cast<uintptr_t>(NtCurrentTeb());
++  const auto Read = [Teb](uintptr_t Offset) {
++    return *reinterpret_cast<const uint64_t*>(Teb + Offset);
++  };
++  const auto Line = fextl::fmt::format(
++    "steamacexc {:04x} {} code={:08x} flags={:x} rip={:x} rsp={:x} pc={:x} sp={:x} host={:x} base={:x} limit={:x} dealloc={:x} "
++    "i0={:x} i1={:x}\n",
++    GetCurrentThreadId(), What, Rec->ExceptionCode, Rec->ExceptionFlags, Guest->Rip, Guest->Rsp, Native->Pc, Native->Sp,
++    reinterpret_cast<uintptr_t>(__builtin_frame_address(0)), Read(0x8), Read(0x10), Read(0x1478),
++    Rec->NumberParameters > 0 ? Rec->ExceptionInformation[0] : 0, Rec->NumberParameters > 1 ? Rec->ExceptionInformation[1] : 0);
++  WineDbgOut(Line.c_str());
++}
++} // namespace ExceptionLog
++
+ namespace Exception {
+ static std::optional<FEX::Windows::TSOHandlerConfig> HandlerConfig;
+ static uintptr_t KiUserExceptionDispatcher;
+@@ -978,6 +1013,7 @@ NTSTATUS ProcessInit() {
+   FEX::Config::LoadConfig(AppConfigName, _environ, FEX::ReadPortabilityInformation());
+   FEXCore::Config::ReloadMetaLayer();
+   FEX::Windows::Logging::Init();
++  ExceptionLog::Init();
+   FEXCore::Config::Set(FEXCore::Config::CONFIG_APP_FILENAME, ExecutablePath);
+   FEXCore::Config::Set(FEXCore::Config::CONFIG_APP_CONFIG_NAME, AppConfigName);
+ 
+@@ -1124,6 +1160,7 @@ bool ResetToConsistentStateImpl(const ThreadCPUArea CPUArea, EXCEPTION_RECORD* E
+ 
+   if (!IsJIT && !IsDispatcherAddress(NativeContext->Pc)) {
+     LogMan::Msg::DFmt("Passing through exception");
++    ExceptionLog::Log("pass", Exception, GuestContext, NativeContext);
+     return false;
+   }
+ 
+@@ -1144,6 +1181,7 @@ bool ResetToConsistentStateImpl(const ThreadCPUArea CPUArea, EXCEPTION_RECORD* E
+     return true;
+   } else {
+     LogMan::Msg::EFmt("Unexpected exception in JIT code on guest stack");
++    ExceptionLog::Log("jit-on-guest-stack", Exception, GuestContext, NativeContext);
+     return false;
+   }
+ }

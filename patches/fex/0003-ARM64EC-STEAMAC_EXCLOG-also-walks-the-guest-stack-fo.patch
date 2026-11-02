@@ -1,0 +1,141 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: jason chien <3936511+jason5545@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 19:30:19 +0800
+Subject: [PATCH 3/6] ARM64EC: STEAMAC_EXCLOG also walks the guest stack for
+ the first non-single-step exceptions
+
+Logs every frame the way call_seh_handlers unwinds it (RtlLookupFunctionEntry + RtlVirtualUnwind on the x64 context)
+and stops before passing ntdll an address outside user space, then lists the stack slots that hold code addresses.
+MSFS 2024's main thread dies because Wine's ARM64EC RtlIsEcCode faults on a garbage unwound PC and every nested
+access violation unwinds into the same PC again.
+---
+ Source/Windows/ARM64EC/Module.cpp | 109 ++++++++++++++++++++++++++++++
+ 1 file changed, 109 insertions(+)
+
+diff --git a/Source/Windows/ARM64EC/Module.cpp b/Source/Windows/ARM64EC/Module.cpp
+index 2bd8e80d6..de4c29f39 100644
+--- a/Source/Windows/ARM64EC/Module.cpp
++++ b/Source/Windows/ARM64EC/Module.cpp
+@@ -687,6 +687,111 @@ void Log(const char* What, const EXCEPTION_RECORD* Rec, const CONTEXT* Guest, co
+     Rec->NumberParameters > 0 ? Rec->ExceptionInformation[0] : 0, Rec->NumberParameters > 1 ? Rec->ExceptionInformation[1] : 0);
+   WineDbgOut(Line.c_str());
+ }
++
++// Walks the guest stack the way Wine's call_seh_handlers does (RtlLookupFunctionEntry + RtlVirtualUnwind on the x64
++// context), logging every frame, and stops before handing ntdll an address outside user space (Wine's ARM64EC
++// RtlIsEcCode indexes its bitmap without a bounds check). Then lists the stack slots that hold code-looking values,
++// to see where the walk left the real return addresses. Done for the first few non-single-step exceptions only.
++int WalksLeft = 6;
++
++void Walk(const CONTEXT* Guest) {
++  using LookupFn = void*(WINAPI*)(ULONG_PTR, ULONG_PTR*, void*);
++  using UnwindFn = void*(WINAPI*)(DWORD, ULONG_PTR, ULONG_PTR, void*, CONTEXT*, void**, ULONG_PTR*, void*);
++  using IsEcFn = BOOLEAN(WINAPI*)(ULONG_PTR);
++  using PcToHeaderFn = void*(WINAPI*)(void*, void**);
++  static LookupFn Lookup;
++  static UnwindFn Unwind;
++  static IsEcFn IsEc;
++  static PcToHeaderFn PcToHeader;
++  if (!Lookup) {
++    const auto NtDll = GetModuleHandleW(L"ntdll.dll");
++    Lookup = reinterpret_cast<LookupFn>(GetProcAddress(NtDll, "RtlLookupFunctionEntry"));
++    Unwind = reinterpret_cast<UnwindFn>(GetProcAddress(NtDll, "RtlVirtualUnwind"));
++    IsEc = reinterpret_cast<IsEcFn>(GetProcAddress(NtDll, "RtlIsEcCode"));
++    PcToHeader = reinterpret_cast<PcToHeaderFn>(GetProcAddress(NtDll, "RtlPcToFileHeader"));
++  }
++  if (!Lookup || !Unwind || !IsEc || !PcToHeader) {
++    WineDbgOut("steamacwalk missing ntdll exports\n");
++    return;
++  }
++
++  const auto Teb = reinterpret_cast<uintptr_t>(NtCurrentTeb());
++  const uint64_t StackBase = *reinterpret_cast<const uint64_t*>(Teb + 0x8);
++  const uint64_t StackLow = *reinterpret_cast<const uint64_t*>(Teb + 0x1478);
++  constexpr uint64_t UserSpaceLimit = 0x7fffffff0000ULL;
++  constexpr DWORD UnwoundToCall = 0x20000000; // CONTEXT_UNWOUND_TO_CALL
++
++  CONTEXT Context = *Guest;
++  const uint64_t FirstSp = Context.Rsp;
++  for (int Index = 0; Index < 48; ++Index) {
++    const uint64_t Pc = Context.Rip;
++    const uint64_t Sp = Context.Rsp;
++    const char* Stop = nullptr;
++    if (Pc == 0) {
++      Stop = "pc-zero";
++    } else if (Pc >= UserSpaceLimit) {
++      Stop = "pc-outside-user-space";
++    } else if (Sp < StackLow || Sp > StackBase) {
++      Stop = "sp-outside-stack";
++    }
++    if (Stop) {
++      WineDbgOut(fextl::fmt::format("steamacwalk {:04x} #{} pc={:x} rsp={:x} STOP {}\n", GetCurrentThreadId(), Index, Pc, Sp, Stop).c_str());
++      break;
++    }
++
++    const bool Ec = IsEc(Pc);
++    uint64_t LookupPc = Pc;
++    if ((Context.ContextFlags & UnwoundToCall) && Ec) {
++      LookupPc -= 4;
++    }
++    ULONG_PTR ImageBase = 0;
++    void* Function = Lookup(LookupPc, &ImageBase, nullptr);
++    void* Module = nullptr;
++    PcToHeader(reinterpret_cast<void*>(Pc), &Module);
++    uint32_t Begin = 0, End = 0;
++    if (Function && !Ec) {
++      Begin = reinterpret_cast<const uint32_t*>(Function)[0];
++      End = reinterpret_cast<const uint32_t*>(Function)[1];
++    } else if (Function) {
++      Begin = reinterpret_cast<const uint32_t*>(Function)[0];
++    }
++
++    const uint64_t Rbp = Context.Rbp;
++    void* HandlerData = nullptr;
++    ULONG_PTR Establisher = 0;
++    void* Handler = Unwind(1 /* UNW_FLAG_EHANDLER */ | 2 /* UNW_FLAG_UHANDLER */, ImageBase, LookupPc, Function, &Context, &HandlerData,
++                           &Establisher, nullptr);
++    WineDbgOut(fextl::fmt::format("steamacwalk {:04x} #{} pc={:x} rsp={:x} rbp={:x} {} module={:x} fn={}{:x}-{:x} handler={:x} frame={:x} -> pc={:x} "
++                                  "rsp={:x}\n",
++                                  GetCurrentThreadId(), Index, Pc, Sp, Rbp, Ec ? "ec" : "x64", reinterpret_cast<uintptr_t>(Module),
++                                  Function ? "" : "none ", Begin, End, reinterpret_cast<uintptr_t>(Handler), Establisher, Context.Rip,
++                                  Context.Rsp)
++                 .c_str());
++    if (Context.Rsp == Sp && Context.Rip == Pc) {
++      WineDbgOut(fextl::fmt::format("steamacwalk {:04x} #{} STOP no-progress\n", GetCurrentThreadId(), Index).c_str());
++      break;
++    }
++  }
++
++  // Code-looking values on the stack between the exception and the top of the stack.
++  fextl::string Slots;
++  int Count = 0;
++  for (uint64_t Slot = FirstSp & ~7ULL; Slot + 8 <= StackBase && Count < 96; Slot += 8) {
++    const uint64_t Value = *reinterpret_cast<const uint64_t*>(Slot);
++    const bool LooksLikeCode = (Value >= 0x140000000ULL && Value < 0x200000000ULL) || (Value >= 0x6f0000000000ULL && Value < UserSpaceLimit);
++    if (!LooksLikeCode) {
++      continue;
++    }
++    void* Module = nullptr;
++    PcToHeader(reinterpret_cast<void*>(Value), &Module);
++    if (!Module) {
++      continue;
++    }
++    Slots += fextl::fmt::format(" {:x}:{:x}{}", Slot, Value, IsEc(Value) ? "/ec" : "");
++    ++Count;
++  }
++  WineDbgOut(fextl::fmt::format("steamacwalk {:04x} slots base={:x}{}\n", GetCurrentThreadId(), StackBase, Slots).c_str());
++}
+ } // namespace ExceptionLog
+ 
+ namespace Exception {
+@@ -1161,6 +1266,10 @@ bool ResetToConsistentStateImpl(const ThreadCPUArea CPUArea, EXCEPTION_RECORD* E
+   if (!IsJIT && !IsDispatcherAddress(NativeContext->Pc)) {
+     LogMan::Msg::DFmt("Passing through exception");
+     ExceptionLog::Log("pass", Exception, GuestContext, NativeContext);
++    if (ExceptionLog::Enabled && Exception->ExceptionCode != EXCEPTION_SINGLE_STEP && ExceptionLog::WalksLeft > 0) {
++      --ExceptionLog::WalksLeft;
++      ExceptionLog::Walk(GuestContext);
++    }
+     return false;
+   }
+ 

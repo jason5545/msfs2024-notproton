@@ -1,0 +1,685 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: jason chien <3936511+jason5545@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 21:12:26 +0800
+Subject: [PATCH 6/6] FEXCore, ARM64EC: adaptive per-page SMC handling (hot
+ pages)
+
+Port of steamac-dr 8035502f2 (0005) and a26b7d158 (0006) from the Linux
+frontend to the Windows one (InvalidationTracker, used by ARM64EC).
+
+With SMCChecks=mtrack every RWX guest page FEX compiled code from is
+protected PAGE_EXECUTE_READ. A write faults, goes through Wine's
+exception dispatch into ResetToConsistentState, and
+HandleRWXAccessViolation drops every block of the page in every thread
+and unprotects it; the next compile protects it again. On Wine ARM64EC
+(CrossOver 27 Preview, Apple Silicon) that costs 27-37 us per write
+(tools/smc-test T1), 3-4x the Linux path. MSFS 2024's four-slot
+breakpoint phase writes data into pages it keeps executing; there a
+round takes ~0.8 s on the Mac against 28-65 ms with hot pages on Linux.
+
+A page that takes STEAMAC_SMC_HOT (default 8, 0 disables) write faults
+within 2 s becomes hot for the rest of the process: it is no longer
+write-protected, and every instruction compiled from it validates its
+own guest bytes before it runs with the SMCChecks=full check.
+
+FEXCore (same as the Linux version):
+- SteamacSMC: lock-free fault counters (16384 slots, 8-way open
+  addressing) and hot-page table. The clock is the generic timer
+  (cntvct_el0) instead of clock_gettime; no function-local statics.
+- GenerateIR: per-instruction validation on hot pages.
+- CompileBlock: no disk-cached code for hot pages.
+- InvalidateCodeBuffersCodeRange returns whether the range had code
+  pages; new InvalidateThreadExecutableRangeCache.
+
+Windows frontend:
+- HandleRWXAccessViolation: NoteFault with CodeInvalidationMutex held,
+  before the page is invalidated and unprotected.
+- ProtectRWXIntervalsInternal (re-protect after a compile): leave hot
+  pages writable.
+- InvalidateIntervalInternalLocked: no per-thread L1/L2 walk when no
+  code buffer had code in the range.
+- ARM64EC InvalidateGuestCodeRange takes ThreadCreationMutex: failed
+  validations come here from JIT code and the invalidation walks the
+  thread map.
+- STEAMAC_SMCSTATS=1: one "steamacsmc" line per second through
+  __wine_dbg_output (faults, became hot, hot pages, validation misses,
+  re-protects skipped, invalidations with and without code).
+  0004's per-thread SMCSTAT is not ported (thread_local does not work
+  in this module).
+
+STEAMAC_SMC_HOT=0 turns all of the frontend changes off (old paths).
+
+tools/smc-test (msfs2024-steamac), CrossOver 27 Preview runner copy:
+T1 data writes into a code page 27-36 us -> 15-20 ns per iteration,
+T6 512 pages 27-36 us -> 89 ns per call; T2-T4, T8 (protection
+changes) and T7 (cross-thread patching in lock step, threads created
+meanwhile) PASS with hot pages, with STEAMAC_SMC_HOT=0 and before.
+tools/eh-test dr (20,001 x 4) and onlyskip (1000/1000), tools/dr-test
+PASS, also with STEAMAC_SMC_HOT=0.
+
+steamac local patch (msfs2024-steamac patches/fex). Not for upstream.
+---
+ FEXCore/Source/Interface/Context/Context.h    |   3 +-
+ FEXCore/Source/Interface/Core/Core.cpp        | 187 +++++++++++++++++-
+ FEXCore/Source/Interface/Core/LookupCache.h   |   5 +-
+ FEXCore/include/FEXCore/Core/Context.h        |   6 +-
+ FEXCore/include/FEXCore/Utils/SteamacSMC.h    |  67 +++++++
+ Source/Windows/ARM64EC/Module.cpp             |  10 +
+ Source/Windows/Common/InvalidationTracker.cpp | 125 +++++++++++-
+ Source/Windows/Common/InvalidationTracker.h   |   1 +
+ 8 files changed, 387 insertions(+), 17 deletions(-)
+ create mode 100644 FEXCore/include/FEXCore/Utils/SteamacSMC.h
+
+diff --git a/FEXCore/Source/Interface/Context/Context.h b/FEXCore/Source/Interface/Context/Context.h
+index 9d6088b81..7fb77cdac 100644
+--- a/FEXCore/Source/Interface/Context/Context.h
++++ b/FEXCore/Source/Interface/Context/Context.h
+@@ -224,8 +224,9 @@ public:
+ 
+   void OnCodeBufferAllocated(const std::shared_ptr<CPU::CodeBuffer>&) override;
+   void ClearCodeCache(FEXCore::Core::InternalThreadState* Thread, bool NewCodeBuffer = true) override;
+-  void InvalidateCodeBuffersCodeRange(uint64_t Start, uint64_t Length) override;
++  bool InvalidateCodeBuffersCodeRange(uint64_t Start, uint64_t Length) override;
+   void InvalidateThreadCachedCodeRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Start, uint64_t Length) override;
++  void InvalidateThreadExecutableRangeCache(FEXCore::Core::InternalThreadState* Thread) override;
+   FEXCore::Utils::WritePriorityMutex::Mutex& GetCodeInvalidationMutex() override {
+     return CodeInvalidationMutex;
+   }
+diff --git a/FEXCore/Source/Interface/Core/Core.cpp b/FEXCore/Source/Interface/Core/Core.cpp
+index 2c040e448..92f9ddf84 100644
+--- a/FEXCore/Source/Interface/Core/Core.cpp
++++ b/FEXCore/Source/Interface/Core/Core.cpp
+@@ -51,6 +51,7 @@ $end_info$
+ #include <FEXCore/Utils/Threads.h>
+ #include <FEXCore/Utils/Profiler.h>
+ #include <FEXCore/Utils/SHMStats.h>
++#include <FEXCore/Utils/SteamacSMC.h>
+ #include <FEXCore/fextl/fmt.h>
+ #include <FEXCore/fextl/memory.h>
+ #include <FEXCore/fextl/set.h>
+@@ -63,6 +64,7 @@ $end_info$
+ #include <atomic>
+ #include <chrono>
+ #include <condition_variable>
++#include <cstdlib>
+ #include <fcntl.h>
+ #include <functional>
+ #include <mutex>
+@@ -78,6 +80,163 @@ $end_info$
+ #include <utility>
+ #include <xxhash.h>
+ 
++namespace FEXCore::SteamacSMC {
++// Adaptive per-page SMC handling (steamac r10, Windows port), see FEXCore/Utils/SteamacSMC.h.
++namespace {
++  constexpr size_t HotSlots = 8192; // power of two; at most HotSlots / 2 pages are made hot
++  constexpr size_t MaxProbes = 64;
++  std::atomic<uint64_t> HotTable[HotSlots]; // page + 1, 0 = empty slot
++  std::atomic<uint32_t> NumHot {0};
++
++  // Fault counters: open addressing over CounterWays slots. A direct-mapped table is not enough: two pages that both
++  // fault all the time and share a slot keep restarting each other's count and never become hot (r10 h1: ~1,000
++  // faults/s left on such pairs). A page takes its own slot, an empty or expired one, or else the one with the lowest
++  // count among its CounterWays candidates. Races between threads only make the counts approximate.
++  constexpr size_t CounterSlots = 16384; // power of two
++  constexpr size_t CounterWays = 8;
++  struct FaultCounter {
++    std::atomic<uint64_t> Page; // page + 1, 0 = empty
++    std::atomic<uint32_t> Count;
++    std::atomic<uint32_t> WindowStartMs;
++  };
++  FaultCounter FaultCounters[CounterSlots];
++  constexpr uint32_t WindowMs = 2000;
++
++  // Read once from the environment. No function-local statics: keep it to plain atomics (-1 = not read yet).
++  std::atomic<int64_t> CachedThreshold {-1};
++  std::atomic<int32_t> CachedStatsEnabled {-1};
++  Counters StatsCounters {};
++
++  size_t Mix(uint64_t Page) {
++    return static_cast<size_t>((Page * 0x9E3779B97F4A7C15ULL) >> 32);
++  }
++
++  bool Insert(uint64_t Page) {
++    const uint64_t Key = Page + 1;
++    if (NumHot.load(std::memory_order_relaxed) >= HotSlots / 2) {
++      return false;
++    }
++    for (size_t i = 0, Slot = Mix(Page); i < MaxProbes; ++i, ++Slot) {
++      auto& Entry = HotTable[Slot & (HotSlots - 1)];
++      uint64_t Current = Entry.load(std::memory_order_acquire);
++      if (Current == Key) {
++        return true;
++      }
++      if (Current == 0) {
++        if (Entry.compare_exchange_strong(Current, Key, std::memory_order_acq_rel)) {
++          NumHot.fetch_add(1, std::memory_order_release);
++          return true;
++        }
++        if (Current == Key) {
++          return true;
++        }
++      }
++    }
++    return false;
++  }
++} // namespace
++
++uint32_t NowMs() {
++#ifdef ARCHITECTURE_arm64
++  // The generic timer: no syscall, no locks, fine in signal handlers and in Wine's exception callbacks.
++  uint64_t Count, Frequency;
++  __asm volatile("mrs %0, cntvct_el0" : "=r"(Count));
++  __asm volatile("mrs %0, cntfrq_el0" : "=r"(Frequency));
++  return Frequency >= 1000 ? static_cast<uint32_t>(Count / (Frequency / 1000)) : 0;
++#else
++  return static_cast<uint32_t>(
++    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
++#endif
++}
++
++uint32_t Threshold() {
++  int64_t Value = CachedThreshold.load(std::memory_order_relaxed);
++  if (Value < 0) [[unlikely]] {
++    const char* Env = getenv("STEAMAC_SMC_HOT");
++    Value = (!Env || !Env[0]) ? 8 : static_cast<int64_t>(strtoul(Env, nullptr, 0) & 0xFFFFFFFFU);
++    CachedThreshold.store(Value, std::memory_order_relaxed);
++  }
++  return static_cast<uint32_t>(Value);
++}
++
++bool StatsEnabled() {
++  int32_t Value = CachedStatsEnabled.load(std::memory_order_relaxed);
++  if (Value < 0) [[unlikely]] {
++    const char* Env = getenv("STEAMAC_SMCSTATS");
++    Value = Env && Env[0] == '1';
++    CachedStatsEnabled.store(Value, std::memory_order_relaxed);
++  }
++  return Value != 0;
++}
++
++Counters& Stats() {
++  return StatsCounters;
++}
++
++uint32_t HotCount() {
++  return NumHot.load(std::memory_order_acquire);
++}
++
++bool IsHot(uint64_t Page) {
++  if (!HotCount()) {
++    return false;
++  }
++  const uint64_t Key = Page + 1;
++  for (size_t i = 0, Slot = Mix(Page); i < MaxProbes; ++i, ++Slot) {
++    const uint64_t Current = HotTable[Slot & (HotSlots - 1)].load(std::memory_order_acquire);
++    if (Current == Key) {
++      return true;
++    }
++    if (Current == 0) {
++      return false;
++    }
++  }
++  return false;
++}
++
++int NoteFault(uint64_t Page) {
++  const uint32_t Limit = Threshold();
++  if (!Limit) {
++    return 0;
++  }
++  if (IsHot(Page)) {
++    return 2;
++  }
++  const uint64_t Key = Page + 1;
++  const uint32_t Now = NowMs();
++  const size_t Base = Mix(Page);
++  FaultCounter* Own = nullptr;
++  FaultCounter* Victim = nullptr;
++  uint32_t VictimCount = ~0U;
++  for (size_t i = 0; i < CounterWays; ++i) {
++    auto& C = FaultCounters[(Base + i) & (CounterSlots - 1)];
++    const uint64_t P = C.Page.load(std::memory_order_relaxed);
++    if (P == Key) {
++      Own = &C;
++      break;
++    }
++    const bool Free = P == 0 || Now - C.WindowStartMs.load(std::memory_order_relaxed) > WindowMs;
++    const uint32_t Count = Free ? 0 : C.Count.load(std::memory_order_relaxed);
++    if (Count < VictimCount) {
++      Victim = &C;
++      VictimCount = Count;
++    }
++  }
++  if (Own && Now - Own->WindowStartMs.load(std::memory_order_relaxed) <= WindowMs) {
++    if (Own->Count.fetch_add(1, std::memory_order_relaxed) + 1 >= Limit) {
++      return Insert(Page) ? 1 : 0;
++    }
++    return 0;
++  }
++  // New window: in the page's own (expired) slot, or in the victim slot.
++  FaultCounter& C = Own ? *Own : *Victim;
++  C.Page.store(Key, std::memory_order_relaxed);
++  C.WindowStartMs.store(Now, std::memory_order_relaxed);
++  C.Count.store(1, std::memory_order_relaxed);
++  return (Limit <= 1 && Insert(Page)) ? 1 : 0;
++}
++} // namespace FEXCore::SteamacSMC
++
+ namespace FEXCore::Context {
+ ContextImpl::ContextImpl(const FEXCore::HostFeatures& Features)
+   : HostFeatures {Features}
+@@ -563,6 +722,11 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+     fextl::vector<uint64_t> HWBreakpointAddresses;
+     GetGuestHWBreakpointAddresses(&HWBreakpointAddresses);
+ 
++    // Adaptive SMC (steamac r10): instructions on hot pages validate their bytes like SMCChecks=full, since those pages
++    // are not write-protected. See FEXCore/Utils/SteamacSMC.h.
++    const bool SteamacHotPages =
++      Config.SMCChecks == FEXCore::Config::CONFIG_SMC_MTRACK && SteamacSMC::Threshold() && SteamacSMC::AnyHot();
++
+ #ifdef ZYDIS_DISASSEMBLER
+     const auto ZydisMachineMode = Config.Is64BitMode ? ZYDIS_MACHINE_MODE_LONG_64 : ZYDIS_MACHINE_MODE_LEGACY_32;
+     if (FEXCore::Config::Get_X86DISASSEMBLE()) {
+@@ -649,7 +813,8 @@ ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t Gue
+           Thread->OpDispatcher->_GuestOpcode(InstAddress - GuestRIP);
+         }
+ 
+-        if (Config.SMCChecks == FEXCore::Config::CONFIG_SMC_FULL || Block.ForceFullSMCDetection) {
++        if (Config.SMCChecks == FEXCore::Config::CONFIG_SMC_FULL || Block.ForceFullSMCDetection ||
++            (SteamacHotPages && SteamacSMC::RangeIsHot(InstAddress, DecodedInfo->InstSize))) {
+           auto ExistingCodePtr = reinterpret_cast<uint8_t*>(Block.Entry + BlockInstructionsLength);
+           auto InstAddressReg = Thread->OpDispatcher->_EntrypointOffset(GPRSize, InstAddress - GuestRIP);
+ 
+@@ -897,7 +1062,11 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
+   {
+     FEXCORE_PROFILE_ACCUMULATION(Thread, AccumulatedDiskCacheLookupTime);
+     Hit = DiskCache.Lookup(Thread, Region, GuestRIP, DiskCacheGuestCodeKey);
+-    if (Hit && !DiskCache.IsValidating()) {
++    // Cached code has no per-instruction validation, so it can't be used for code on hot (unprotected) SMC pages.
++    const bool SteamacHotHit = Hit && SteamacSMC::AnyHot() && std::any_of(Hit->GuestPages.begin(), Hit->GuestPages.end(), [](uint64_t Page) {
++                                 return SteamacSMC::RangeIsHot(Page, FEXCore::Utils::FEX_PAGE_SIZE);
++                               });
++    if (Hit && !DiskCache.IsValidating() && !SteamacHotHit) {
+       auto LoadedCode = Thread->CPUBackend->LoadCachedCode(Hit->HostCode);
+       if (LoadedCode.BlockBegin) {
+         for (auto& CodePage : Hit->GuestPages) {
+@@ -1059,20 +1228,27 @@ uintptr_t ContextImpl::CompileSingleStep(FEXCore::Core::CpuStateFrame* Frame, ui
+   return (uintptr_t)CodePtr;
+ }
+ 
+-void ContextImpl::InvalidateCodeBuffersCodeRange(uint64_t Start, uint64_t Length) {
++bool ContextImpl::InvalidateCodeBuffersCodeRange(uint64_t Start, uint64_t Length) {
+   FEXCORE_PROFILE_SCOPED("InvalidateCodeBuffersCodeRange");
+ 
+   LOGMAN_THROW_A_FMT(CodeInvalidationMutex.try_lock() == false, "CodeInvalidationMutex needs to be unique_locked here");
+   std::scoped_lock lk {CodeBufferListLock};
++  bool HadCodePages = false;
+   auto it = CodeBufferList.begin();
+   while (it != CodeBufferList.end()) {
+     if (auto Strong = it->lock()) {
+-      Strong->LookupCache->InvalidateRange(Start, Length);
++      HadCodePages |= Strong->LookupCache->InvalidateRange(Start, Length);
+       it++;
+     } else {
+       it = CodeBufferList.erase(it);
+     }
+   }
++  return HadCodePages;
++}
++
++void ContextImpl::InvalidateThreadExecutableRangeCache(FEXCore::Core::InternalThreadState* Thread) {
++  LOGMAN_THROW_A_FMT(CodeInvalidationMutex.try_lock() == false, "CodeInvalidationMutex needs to be unique_locked here");
++  Thread->FrontendDecoder->ResetExecutableRangeCache();
+ }
+ 
+ void ContextImpl::InvalidateThreadCachedCodeRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Start, uint64_t Length) {
+@@ -1091,6 +1267,9 @@ void ContextImpl::InvalidateThreadCachedCodeRange(FEXCore::Core::InternalThreadS
+ }
+ 
+ void ContextImpl::ThreadRemoveCodeEntryFromJit(FEXCore::Core::CpuStateFrame* Frame, uint64_t GuestRIP) {
++  if (SteamacSMC::StatsEnabled()) [[unlikely]] {
++    SteamacSMC::Stats().ValidateMiss.fetch_add(1, std::memory_order_relaxed);
++  }
+   static_cast<ContextImpl*>(Frame->Thread->CTX)->SyscallHandler->InvalidateGuestCodeRange(Frame->Thread, GuestRIP, 1);
+ }
+ 
+diff --git a/FEXCore/Source/Interface/Core/LookupCache.h b/FEXCore/Source/Interface/Core/LookupCache.h
+index 391d48560..0a3f91fd1 100644
+--- a/FEXCore/Source/Interface/Core/LookupCache.h
++++ b/FEXCore/Source/Interface/Core/LookupCache.h
+@@ -125,11 +125,13 @@ struct GuestToHostMap {
+     return BlockList.erase(Address) != 0;
+   }
+ 
+-  void InvalidateRange(uint64_t Start, uint64_t Length) {
++  // Returns true if any code page was tracked in the range (steamac r10).
++  bool InvalidateRange(uint64_t Start, uint64_t Length) {
+     auto lk = AcquireWriteLock();
+ 
+     auto lower = CodePages.lower_bound(Start >> 12);
+     auto upper = CodePages.upper_bound((Start + Length - 1) >> 12);
++    const bool HadPages = lower != upper;
+ 
+     for (auto it = lower; it != upper; it++) {
+       for (const auto& Entry : it->second) {
+@@ -137,6 +139,7 @@ struct GuestToHostMap {
+       }
+     }
+     CodePages.erase(lower, upper);
++    return HadPages;
+   }
+ 
+   void AddBlockLink(uint64_t GuestDestination, FEXCore::Context::ExitFunctionLinkData* HostLink,
+diff --git a/FEXCore/include/FEXCore/Core/Context.h b/FEXCore/include/FEXCore/Core/Context.h
+index dbcae3eb8..3cf295950 100644
+--- a/FEXCore/include/FEXCore/Core/Context.h
++++ b/FEXCore/include/FEXCore/Core/Context.h
+@@ -140,9 +140,13 @@ public:
+   virtual void FlushAndCloseCodeMap() = 0;
+ 
+   FEX_DEFAULT_VISIBILITY virtual void ClearCodeCache(FEXCore::Core::InternalThreadState* Thread, bool NewCodeBuffer = true) = 0;
+-  FEX_DEFAULT_VISIBILITY virtual void InvalidateCodeBuffersCodeRange(uint64_t Start, uint64_t Length) = 0;
++  // Returns true if any code buffer had guest code pages in the range (steamac r10). If none had, no thread can have
++  // blocks of the range in its L1/L2 cache either, and the caller only needs InvalidateThreadExecutableRangeCache.
++  FEX_DEFAULT_VISIBILITY virtual bool InvalidateCodeBuffersCodeRange(uint64_t Start, uint64_t Length) = 0;
+   FEX_DEFAULT_VISIBILITY virtual void
+   InvalidateThreadCachedCodeRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Start, uint64_t Length) = 0;
++  // The part of InvalidateThreadCachedCodeRange that does not depend on the range (steamac r10).
++  FEX_DEFAULT_VISIBILITY virtual void InvalidateThreadExecutableRangeCache(FEXCore::Core::InternalThreadState* Thread) = 0;
+   FEX_DEFAULT_VISIBILITY virtual FEXCore::Utils::WritePriorityMutex::Mutex& GetCodeInvalidationMutex() = 0;
+ 
+   FEX_DEFAULT_VISIBILITY virtual void
+diff --git a/FEXCore/include/FEXCore/Utils/SteamacSMC.h b/FEXCore/include/FEXCore/Utils/SteamacSMC.h
+new file mode 100644
+index 000000000..89c7d1e7a
+--- /dev/null
++++ b/FEXCore/include/FEXCore/Utils/SteamacSMC.h
+@@ -0,0 +1,67 @@
++// SPDX-License-Identifier: MIT
++#pragma once
++
++#include <FEXCore/Utils/CompilerDefs.h>
++
++#include <atomic>
++#include <cstdint>
++
++/*
++ * Adaptive per-page SMC handling for SMCChecks=mtrack (steamac r10, ported to the Windows frontends).
++ *
++ * mtrack write-protects every guest page that FEX compiled code from. A guest write to such a page faults; the fault
++ * handler throws away every block compiled from the page in every thread, makes the page writable again, and the next
++ * compile from the page protects it again. A guest that keeps writing data (or code that is not executed in between)
++ * into pages that also hold code it is running pays an exception, two protection changes, a page-wide invalidation
++ * across all threads and recompiles of unchanged code for every such write.
++ *
++ * A page that takes Threshold() write faults within a short window becomes "hot": it is no longer write-protected, and
++ * every instruction compiled from it validates its own guest bytes before it runs (the same per-instruction check as
++ * SMCChecks=full, see GenerateIR). Writes to the page then cost nothing, and code in it is only recompiled when the bytes
++ * of an instruction that is about to run actually changed. A page stays hot for the rest of the process.
++ *
++ * The frontend calls NoteFault for every SMC write fault, before it invalidates the page, and leaves hot pages out when
++ * it protects pages again. Threshold() comes from STEAMAC_SMC_HOT (default 8, 0 disables). The tables are fixed-size and
++ * lock-free (async-signal-safe on Linux, where NoteFault runs in the SIGSEGV handler); when the hot table is full no
++ * further pages become hot.
++ */
++namespace FEXCore::SteamacSMC {
++FEX_DEFAULT_VISIBILITY uint32_t Threshold();
++// SMC write fault on a guest page (page number = address >> 12): 0 = not hot, 1 = became hot with this fault,
++// 2 = was already hot (should not happen: hot pages are not write-protected).
++FEX_DEFAULT_VISIBILITY int NoteFault(uint64_t Page);
++FEX_DEFAULT_VISIBILITY bool IsHot(uint64_t Page);
++FEX_DEFAULT_VISIBILITY uint32_t HotCount();
++// Milliseconds from a monotonic clock that is safe to read anywhere (signal handlers, exception callbacks).
++FEX_DEFAULT_VISIBILITY uint32_t NowMs();
++
++inline bool AnyHot() {
++  return HotCount() != 0;
++}
++// True if any byte of [Address, Address + Size) is on a hot page.
++inline bool RangeIsHot(uint64_t Address, uint64_t Size) {
++  if (!AnyHot() || !Size) {
++    return false;
++  }
++  for (uint64_t Page = Address >> 12, Last = (Address + Size - 1) >> 12; Page <= Last; ++Page) {
++    if (IsHot(Page)) {
++      return true;
++    }
++  }
++  return false;
++}
++
++// Process-wide counters for STEAMAC_SMCSTATS=1 (the Windows frontends print them once a second). Plain relaxed atomics:
++// thread_local is not usable in the ARM64EC module (its TLS slot is not set up).
++struct Counters {
++  std::atomic<uint64_t> Faults;            // SMC write faults handled by the frontend
++  std::atomic<uint64_t> BecameHot;         // ... that made their page hot
++  std::atomic<uint64_t> OnHot;             // ... on a page that was already hot
++  std::atomic<uint64_t> ValidateMiss;      // per-instruction validation found changed bytes (SMCChecks=full or hot page)
++  std::atomic<uint64_t> ReprotectSkipped;  // pages left writable when the frontend protected code pages again
++  std::atomic<uint64_t> Invalidations;     // frontend invalidations of guest ranges
++  std::atomic<uint64_t> InvalidationsNoCode; // ... with no compiled code in the range (per-thread walk skipped)
++};
++FEX_DEFAULT_VISIBILITY bool StatsEnabled();
++FEX_DEFAULT_VISIBILITY Counters& Stats();
++} // namespace FEXCore::SteamacSMC
+diff --git a/Source/Windows/ARM64EC/Module.cpp b/Source/Windows/ARM64EC/Module.cpp
+index 5be919849..c44798dac 100644
+--- a/Source/Windows/ARM64EC/Module.cpp
++++ b/Source/Windows/ARM64EC/Module.cpp
+@@ -20,6 +20,7 @@ $end_info$
+ #include <FEXCore/Utils/Threads.h>
+ #include <FEXCore/Utils/Profiler.h>
+ #include <FEXCore/Utils/SHMStats.h>
++#include <FEXCore/Utils/SteamacSMC.h>
+ #include <FEXCore/Utils/EnumOperators.h>
+ #include <FEXCore/Utils/EnumUtils.h>
+ #include <FEXCore/Utils/FPState.h>
+@@ -1185,6 +1186,15 @@ public:
+   }
+ 
+   void InvalidateGuestCodeRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Start, uint64_t Length) override {
++    // Adaptive SMC (steamac r10): with hot pages this is the path of every failed per-instruction validation
++    // (ThreadRemoveCodeEntryFromJit), called from JIT code without locks. The invalidation walks `Threads`, which
++    // needs ThreadCreationMutex; take it (same order as the access violation path: ThreadCreationMutex, then
++    // CodeInvalidationMutex). STEAMAC_SMC_HOT=0 keeps the old unlocked call.
++    if (FEXCore::SteamacSMC::Threshold()) {
++      std::scoped_lock Lock(ThreadCreationMutex);
++      InvalidationTracker->InvalidateAlignedInterval(Start, Length, false);
++      return;
++    }
+     InvalidationTracker->InvalidateAlignedInterval(Start, Length, false);
+   }
+ 
+diff --git a/Source/Windows/Common/InvalidationTracker.cpp b/Source/Windows/Common/InvalidationTracker.cpp
+index d48af1cac..a1ff5d097 100644
+--- a/Source/Windows/Common/InvalidationTracker.cpp
++++ b/Source/Windows/Common/InvalidationTracker.cpp
+@@ -6,17 +6,70 @@
+ #include <FEXCore/Core/Context.h>
+ #include <FEXCore/Config/Config.h>
+ #include <FEXCore/Debug/InternalThreadState.h>
++#include <FEXCore/Utils/SteamacSMC.h>
++#include <FEXCore/fextl/fmt.h>
+ #include "InvalidationTracker.h"
+ #include <windef.h>
+ #include <winternl.h>
+ #include <atomic>
+ 
+ namespace FEX::Windows {
++namespace {
++  // STEAMAC_SMCSTATS=1: once a second, one "steamacsmc" line through __wine_dbg_output with the process-wide SMC counters
++  // of the last second (FEXCore/Utils/SteamacSMC.h). Printed by whichever thread passes by first, never while holding
++  // CodeInvalidationMutex.
++  void (*WineDbgOut)(const char*) {};
++  std::atomic<uint32_t> LastStatsMs {0};
++  struct StatsSnapshot {
++    uint64_t Faults, BecameHot, OnHot, ValidateMiss, ReprotectSkipped, Invalidations, InvalidationsNoCode;
++  };
++  StatsSnapshot LastStats {};
++
++  void MaybePrintStats() {
++    if (!WineDbgOut) [[likely]] {
++      return;
++    }
++    const uint32_t Now = FEXCore::SteamacSMC::NowMs();
++    uint32_t Prev = LastStatsMs.load(std::memory_order_relaxed);
++    if (Now - Prev < 1000 || !LastStatsMs.compare_exchange_strong(Prev, Now, std::memory_order_relaxed)) {
++      return;
++    }
++    auto& S = FEXCore::SteamacSMC::Stats();
++    const StatsSnapshot Cur {
++      S.Faults.load(std::memory_order_relaxed),           S.BecameHot.load(std::memory_order_relaxed),
++      S.OnHot.load(std::memory_order_relaxed),            S.ValidateMiss.load(std::memory_order_relaxed),
++      S.ReprotectSkipped.load(std::memory_order_relaxed), S.Invalidations.load(std::memory_order_relaxed),
++      S.InvalidationsNoCode.load(std::memory_order_relaxed),
++    };
++    const auto Line = fextl::fmt::format("steamacsmc {:04x} ms={} faults={} became_hot={} on_hot={} hot={} vmiss={} reprot_skip={} inv={} "
++                                         "inv_nocode={}\n",
++                                         GetCurrentThreadId(), Now, Cur.Faults - LastStats.Faults, Cur.BecameHot - LastStats.BecameHot,
++                                         Cur.OnHot - LastStats.OnHot, FEXCore::SteamacSMC::HotCount(), Cur.ValidateMiss - LastStats.ValidateMiss,
++                                         Cur.ReprotectSkipped - LastStats.ReprotectSkipped, Cur.Invalidations - LastStats.Invalidations,
++                                         Cur.InvalidationsNoCode - LastStats.InvalidationsNoCode);
++    LastStats = Cur;
++    WineDbgOut(Line.c_str());
++  }
++
++  void Protect(uint64_t Address, uint64_t Size, ULONG Prot) {
++    void* TmpAddress = reinterpret_cast<void*>(Address);
++    SIZE_T TmpSize = static_cast<SIZE_T>(Size);
++    ULONG TmpProt;
++    NtProtectVirtualMemory(NtCurrentProcess(), &TmpAddress, &TmpSize, Prot, &TmpProt);
++  }
++} // namespace
++
+ InvalidationTracker::InvalidationTracker(FEXCore::Context::Context& CTX, const std::unordered_map<DWORD, FEXCore::Core::InternalThreadState*>& Threads)
+   : CTX {CTX}
+   , Threads {Threads} {
+   FEX_CONFIG_OPT(SMCChecks, SMCCHECKS);
+   SMCDetectionDisabled = (SMCChecks == FEXCore::Config::CONFIG_SMC_NONE);
++  // Adaptive SMC (steamac r10, FEXCore/Utils/SteamacSMC.h). STEAMAC_SMC_HOT=0 turns off the hot pages and the
++  // code-free invalidation shortcut below, i.e. everything this port changes in the frontend.
++  SteamacHotPages = SMCChecks == FEXCore::Config::CONFIG_SMC_MTRACK && FEXCore::SteamacSMC::Threshold() != 0;
++  if (FEXCore::SteamacSMC::StatsEnabled()) {
++    WineDbgOut = reinterpret_cast<decltype(WineDbgOut)>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "__wine_dbg_output"));
++  }
+ 
+   MEMORY_BASIC_INFORMATION Info;
+   uint64_t Address = 0;
+@@ -231,6 +284,22 @@ bool InvalidationTracker::HandleRWXAccessViolation(FEXCore::Core::InternalThread
+     {
+       std::scoped_lock Lock(CTX.GetCodeInvalidationMutex());
+ 
++      // Adaptive SMC: count the fault; once the page is hot it stays writable and code compiled from it validates
++      // itself. Marked with CodeInvalidationMutex held and before the invalidation below: compiles in flight finished
++      // before we got the lock and their blocks are dropped below, and compiles after it see the page as hot. So no
++      // block compiled without validation survives on a page that is no longer protected.
++      if (SteamacHotPages) {
++        const int HotState = FEXCore::SteamacSMC::NoteFault(FaultAddress >> 12);
++        if (FEXCore::SteamacSMC::StatsEnabled()) [[unlikely]] {
++          auto& S = FEXCore::SteamacSMC::Stats();
++          S.Faults.fetch_add(1, std::memory_order_relaxed);
++          S.BecameHot.fetch_add(HotState == 1, std::memory_order_relaxed);
++          S.OnHot.fetch_add(HotState == 2, std::memory_order_relaxed);
++        }
++      } else if (FEXCore::SteamacSMC::StatsEnabled()) [[unlikely]] {
++        FEXCore::SteamacSMC::Stats().Faults.fetch_add(1, std::memory_order_relaxed);
++      }
++
+       InvalidateIntervalInternalLocked(FaultAddress & FEXCore::Utils::FEX_PAGE_MASK, FEXCore::Utils::FEX_PAGE_SIZE);
+ 
+       // Invalidate, then unprotect the faulting page with the compilation lock held to ensure that any racing invalidations are not dropped.
+@@ -240,6 +309,7 @@ bool InvalidationTracker::HandleRWXAccessViolation(FEXCore::Core::InternalThread
+       NtProtectVirtualMemory(NtCurrentProcess(), &TmpAddress, &TmpSize, UntrapProt, &TmpProt);
+     }
+     DetectMonoBackpatcherBlock(Thread, HostPc);
++    MaybePrintStats();
+     return true;
+   }
+   return false;
+@@ -336,17 +406,34 @@ void InvalidationTracker::InvalidateIntervalInternal(uint64_t Address, uint64_t
+   if (InvalidationOwner.load(std::memory_order_relaxed) == CurrentThread) {
+     return;
+   }
+-  std::scoped_lock CodeLock(CTX.GetCodeInvalidationMutex());
+-  InvalidationOwner.store(CurrentThread, std::memory_order_relaxed);
+-  InvalidateIntervalInternalLocked(Address, Size);
+-  InvalidationOwner.store(0, std::memory_order_relaxed);
++  {
++    std::scoped_lock CodeLock(CTX.GetCodeInvalidationMutex());
++    InvalidationOwner.store(CurrentThread, std::memory_order_relaxed);
++    InvalidateIntervalInternalLocked(Address, Size);
++    InvalidationOwner.store(0, std::memory_order_relaxed);
++  }
++  MaybePrintStats();
+ }
+ 
+ void InvalidationTracker::InvalidateIntervalInternalLocked(uint64_t Address, uint64_t Size) {
+   // NOTE: This assumes CodeInvalidationMutex is locked by the caller
+-  CTX.InvalidateCodeBuffersCodeRange(Address, Size);
++  const bool HadCodePages = CTX.InvalidateCodeBuffersCodeRange(Address, Size);
++  // steamac r10: the per-thread L1/L2 walk takes the shared lookup map's write lock once per thread. When no code buffer
++  // had code pages in the range (most protection changes, frees and instruction cache flushes), no thread can have
++  // cached blocks there (per-thread caches are filled from the shared maps under CodeInvalidationMutex), and only the
++  // executable range caches need resetting.
++  const bool SkipWalk = SteamacHotPages && !HadCodePages;
+   for (auto Thread : Threads) {
+-    CTX.InvalidateThreadCachedCodeRange(Thread.second, Address, Size);
++    if (SkipWalk) {
++      CTX.InvalidateThreadExecutableRangeCache(Thread.second);
++    } else {
++      CTX.InvalidateThreadCachedCodeRange(Thread.second, Address, Size);
++    }
++  }
++  if (FEXCore::SteamacSMC::StatsEnabled()) [[unlikely]] {
++    auto& S = FEXCore::SteamacSMC::Stats();
++    S.Invalidations.fetch_add(1, std::memory_order_relaxed);
++    S.InvalidationsNoCode.fetch_add(!HadCodePages, std::memory_order_relaxed);
+   }
+ }
+ 
+@@ -372,10 +459,28 @@ bool InvalidationTracker::ProtectRWXIntervalsInternal(uint64_t Address, uint64_t
+         }
+         HitRWXInterval = true;
+       }
+-      void* TmpAddress = reinterpret_cast<void*>(Address);
+-      SIZE_T TmpSize = static_cast<SIZE_T>(std::min(End, Address + Query.Size) - Address);
+-      ULONG TmpProt;
+-      NtProtectVirtualMemory(NtCurrentProcess(), &TmpAddress, &TmpSize, ForWriteLocked ? GetUntrapProt(Address) : GetTrapProt(Address), &TmpProt);
++      const uint64_t ChunkEnd = std::min(End, Address + Query.Size);
++      const ULONG Prot = ForWriteLocked ? GetUntrapProt(Address) : GetTrapProt(Address);
++      if (!ForWriteLocked && SteamacHotPages && FEXCore::SteamacSMC::RangeIsHot(Address, ChunkEnd - Address)) {
++        // Adaptive SMC: hot pages stay writable, code compiled from them validates itself.
++        uint64_t RunStart = Address;
++        for (uint64_t Page = Address & FEXCore::Utils::FEX_PAGE_MASK; Page < ChunkEnd; Page += FEXCore::Utils::FEX_PAGE_SIZE) {
++          if (FEXCore::SteamacSMC::IsHot(Page >> 12)) {
++            if (Page > RunStart) {
++              Protect(RunStart, Page - RunStart, Prot);
++            }
++            RunStart = Page + FEXCore::Utils::FEX_PAGE_SIZE;
++            if (FEXCore::SteamacSMC::StatsEnabled()) [[unlikely]] {
++              FEXCore::SteamacSMC::Stats().ReprotectSkipped.fetch_add(1, std::memory_order_relaxed);
++            }
++          }
++        }
++        if (ChunkEnd > RunStart) {
++          Protect(RunStart, ChunkEnd - RunStart, Prot);
++        }
++      } else {
++        Protect(Address, ChunkEnd - Address, Prot);
++      }
+     } else if (!Query.Size) {
+       // No more regions past `Address` in the interval list
+       break;
+diff --git a/Source/Windows/Common/InvalidationTracker.h b/Source/Windows/Common/InvalidationTracker.h
+index d2a80bcaa..571279ad1 100644
+--- a/Source/Windows/Common/InvalidationTracker.h
++++ b/Source/Windows/Common/InvalidationTracker.h
+@@ -64,6 +64,7 @@ private:
+   FEXCore::Context::Context& CTX;
+   const std::unordered_map<DWORD, FEXCore::Core::InternalThreadState*>& Threads;
+   bool SMCDetectionDisabled {false};                    // Protected by IntervalsLock
++  bool SteamacHotPages {false};                         // Adaptive SMC (FEXCore/Utils/SteamacSMC.h), fixed at construction
+   bool DEPDisabled {false};                             // Protected by IntervalsLock
+   FEXCore::IntervalList<uint64_t> DEPPromotedIntervals; // Protected by IntervalsLock
+ 

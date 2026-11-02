@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: jason chien <3936511+jason5545@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 20:36:45 +0800
+Subject: [PATCH 5/6] ARM64EC: drop the pending RF when the exception handler
+ resumes somewhere other than the breakpoint
+
+A breakpoint hit records HWBreakpointResumeRIP because RF does not survive Wine's ARM64EC context conversion, and the
+breakpoint check consumes it only when execution reaches an armed address again. When the handler resumes elsewhere
+(MSFS 2024's four-slot breakpoint handler emulates the function and returns to its caller), the record stayed and the
+next call of the same function skipped its breakpoint, so the function body ran natively and the game read NULL
+right after.
+
+Reconcile in SyncThreadContext, which every NtContinue back into x64 code goes through: keep the pending RF only if
+execution resumes at the breakpoint address, matching x86 where RF covers only the first instruction after the
+handler returns. ehtest dr_skip: 500/1000 hits before, 1000/1000 after; dr_exec still 20001/20001.
+---
+ Source/Windows/ARM64EC/Module.cpp | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/Source/Windows/ARM64EC/Module.cpp b/Source/Windows/ARM64EC/Module.cpp
+index 6dd67b5d2..5be919849 100644
+--- a/Source/Windows/ARM64EC/Module.cpp
++++ b/Source/Windows/ARM64EC/Module.cpp
+@@ -1218,6 +1218,16 @@ extern "C" void SyncThreadContext(CONTEXT* Context) {
+   uint32_t StateEFlags = CTX->ReconstructCompactedEFLAGS(Thread, false, nullptr, 0);
+   Context->EFlags = (Context->EFlags & ECValidEFlagsMask) | (StateEFlags & ~ECValidEFlagsMask);
+   Exception::LoadStateFromECContext(Thread, *Context);
++
++  // x86 debug register emulation (steamac-dr): a breakpoint hit leaves a pending RF for the breakpoint address
++  // (HWBreakpointResumeRIP), because RF itself does not survive Wine's ARM64EC context conversion. On x86, RF only
++  // covers the first instruction after the exception handler returns. When the handler resumes somewhere else, for
++  // example by emulating the whole function and returning to its caller as MSFS 2024's four-slot breakpoint handler
++  // does, the pending RF must go; otherwise the next call of the same function silently skips its breakpoint.
++  auto& ResumeRIP = Thread->CurrentFrame->State.HWBreakpointResumeRIP;
++  if (ResumeRIP != ~0ULL && ResumeRIP != Context->Rip) {
++    ResumeRIP = ~0ULL;
++  }
+ }
+ 
+ NTSTATUS ProcessInit() {

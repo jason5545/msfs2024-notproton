@@ -1,0 +1,70 @@
+diff --git a/dlls/advapi32/advapi.c b/dlls/advapi32/advapi.c
+index 2284e92..3a617f9 100644
+--- a/dlls/advapi32/advapi.c
++++ b/dlls/advapi32/advapi.c
+@@ -22,6 +22,7 @@
+ #include <stdio.h>
+ #include <string.h>
+ #include <stdarg.h>
++#include <stdlib.h>
+ 
+ #include "windef.h"
+ #include "winbase.h"
+@@ -47,6 +48,16 @@ BOOL WINAPI GetUserNameA( LPSTR name, LPDWORD size )
+     DWORD len = GetEnvironmentVariableA( "WINEUSERNAME", name, *size );
+     BOOL ret;
+ 
++    /* CrossOver Hack 12735: Use a consistent username (ported from crossover-sources 26.3.0) */
++    if (!getenv( "CX_REPORT_REAL_USERNAME" ))
++    {
++        len = sizeof("crossover");
++        if ((ret = (len <= *size))) strcpy( name, "crossover" );
++        else SetLastError( ERROR_INSUFFICIENT_BUFFER );
++        *size = len;
++        return ret;
++    }
++
+     if (!len) return FALSE;
+     if ((ret = (len < *size))) len++;
+     else SetLastError( ERROR_INSUFFICIENT_BUFFER );
+@@ -62,6 +73,16 @@ BOOL WINAPI GetUserNameW( LPWSTR name, LPDWORD size )
+     DWORD len = GetEnvironmentVariableW( L"WINEUSERNAME", name, *size );
+     BOOL ret;
+ 
++    /* CrossOver Hack 12735: Use a consistent username (ported from crossover-sources 26.3.0) */
++    if (!getenv( "CX_REPORT_REAL_USERNAME" ))
++    {
++        len = ARRAY_SIZE( L"crossover" );
++        if ((ret = (len <= *size))) wcscpy( name, L"crossover" );
++        else SetLastError( ERROR_INSUFFICIENT_BUFFER );
++        *size = len;
++        return ret;
++    }
++
+     if (!len) return FALSE;
+     if ((ret = (len < *size))) len++;
+     else SetLastError( ERROR_INSUFFICIENT_BUFFER );
+diff --git a/dlls/advapi32/cred.c b/dlls/advapi32/cred.c
+index dd8d7ce..f9d5424 100644
+--- a/dlls/advapi32/cred.c
++++ b/dlls/advapi32/cred.c
+@@ -1059,7 +1059,9 @@ BOOL WINAPI CredEnumerateW(LPCWSTR Filter, DWORD Flags, DWORD *Count, PCREDENTIA
+     if (ret == ERROR_SUCCESS)
+     {
+         ret = host_enumerate_credentials(Filter, NULL, NULL, &len, Count);
+-        if (ret == ERROR_NOT_SUPPORTED) ret = ERROR_SUCCESS;
++        /* steamac: the macOS mountmgr returns STATUS_NOT_FOUND when no keychain item matches
++         * the filter; that only means there are no host credentials, so keep the registry ones. */
++        if (ret == ERROR_NOT_SUPPORTED || ret == ERROR_NOT_FOUND) ret = ERROR_SUCCESS;
+     }
+     if (ret == ERROR_SUCCESS && *Count == 0)
+         ret = ERROR_NOT_FOUND;
+@@ -1085,7 +1087,7 @@ BOOL WINAPI CredEnumerateW(LPCWSTR Filter, DWORD Flags, DWORD *Count, PCREDENTIA
+             if (ret == ERROR_SUCCESS)
+             {
+                 ret = host_enumerate_credentials(Filter, *Credentials, buffer, &len, Count);
+-                if (ret == ERROR_NOT_SUPPORTED) ret = ERROR_SUCCESS;
++                if (ret == ERROR_NOT_SUPPORTED || ret == ERROR_NOT_FOUND) ret = ERROR_SUCCESS;
+             }
+         }
+         else ret = ERROR_OUTOFMEMORY;

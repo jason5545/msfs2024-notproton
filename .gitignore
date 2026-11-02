@@ -1,0 +1,13 @@
+# 調查紀錄只放本機，不進版本控制（含 log、截圖分析、交接、還沒決定公開的 FEX patch）
+/records/
+
+# 建置產物
+tools/*/build/
+tools/*/out/
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.dylib
+.DS_Store

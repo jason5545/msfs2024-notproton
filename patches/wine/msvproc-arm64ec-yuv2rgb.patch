@@ -1,0 +1,38 @@
+From ef433af4645f2509b42710045fa7d3e71089223e Mon Sep 17 00:00:00 2001
+From: jason chien <3936511+jason5545@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 21:07:09 +0800
+Subject: [PATCH] ffmpeg: Narrow B1/B2 first in the ARM64EC yuv2rgb
+ compute_rgb.
+
+The ARM64EC port keeps Y+B in v10/v11, which are also output registers
+for bgra/bgr24 (r2 = v10), argb/abgr (g2 = v10, abgr r2 = v11) and gbrp
+(r1 = v10, r2 = v11). Narrowing R and G first overwrote them, so the
+blue of pixels 0-7 (and 8-15 for abgr/gbrp) of every 16 was garbage.
+---
+ libs/ffmpeg/libswscale/arm64ec/yuv2rgb_neon.S | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/libs/ffmpeg/libswscale/arm64ec/yuv2rgb_neon.S b/libs/ffmpeg/libswscale/arm64ec/yuv2rgb_neon.S
+index 0792559..4761ea7 100644
+--- a/libs/ffmpeg/libswscale/arm64ec/yuv2rgb_neon.S
++++ b/libs/ffmpeg/libswscale/arm64ec/yuv2rgb_neon.S
+@@ -202,12 +202,14 @@
+         add             v15.8h, v5.8h, v15.8h                           // Y2 + G2
+         add             v10.8h, v4.8h, v10.8h                           // Y1 + B1
+         add             v11.8h, v5.8h, v11.8h                           // Y2 + B2
++        /* B1/B2 live in v10/v11, which are also output registers of some formats (r2 of bgra/bgr24, g2 of
++         * argb/abgr, r1/r2 of gbrp), so narrow them first. b1 is never v11 and no output is v12-v15. */
++        sqrshrun        \b1, v10.8h, #1                                 // clip_u8((Y1 + B1) >> 1)
++        sqrshrun        \b2, v11.8h, #1                                 // clip_u8((Y2 + B1) >> 1)
+         sqrshrun        \r1, v12.8h, #1                                 // clip_u8((Y1 + R1) >> 1)
+         sqrshrun        \r2, v13.8h, #1                                 // clip_u8((Y2 + R1) >> 1)
+         sqrshrun        \g1, v14.8h, #1                                 // clip_u8((Y1 + G1) >> 1)
+         sqrshrun        \g2, v15.8h, #1                                 // clip_u8((Y2 + G1) >> 1)
+-        sqrshrun        \b1, v10.8h, #1                                 // clip_u8((Y1 + B1) >> 1)
+-        sqrshrun        \b2, v11.8h, #1                                 // clip_u8((Y2 + B1) >> 1)
+ .endm
+ 
+ .macro declare_func ifmt ofmt
+-- 
+2.56.0
+

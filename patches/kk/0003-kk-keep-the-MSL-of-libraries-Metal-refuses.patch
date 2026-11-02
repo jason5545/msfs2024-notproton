@@ -1,0 +1,62 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: jason chien <3936511+jason5545@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 07:35:00 +0800
+Subject: [PATCH] kk: keep the MSL of libraries Metal refuses
+
+When Metal fails to compile a library, write its MSL with the error to
+~/Library/Logs/kk-failed-msl/<hash>.metal (at most 200 files), so the
+translation bug can be read after the run.
+
+Applies after 0001.
+---
+diff --git a/src/kosmickrisp/bridge/mtl_compiler.m b/src/kosmickrisp/bridge/mtl_compiler.m
+index 9aab72f..44d8496 100644
+--- a/src/kosmickrisp/bridge/mtl_compiler.m
++++ b/src/kosmickrisp/bridge/mtl_compiler.m
+@@ -17,6 +17,9 @@
+ #include "util/macros.h"
+ 
+ #include <os/lock.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <sys/stat.h>
+ #include <pthread.h>
+ #include <stdio.h>
+ #include <string.h>
+@@ -201,6 +204,28 @@ mtl_new_compiler(mtl_device *device)
+ }
+ 
+ /* Library */
++/* Keep the MSL of a library Metal refuses, with the error, under
++ * ~/Library/Logs/kk-failed-msl/<hash>.metal (at most 200 files), so a
++ * translation bug can be read back after the run. */
++static void
++mtl_dump_failed_msl(const char *src, const char *err)
++{
++   static unsigned dumped;
++   const char *home = getenv("HOME");
++   if (!home || __atomic_fetch_add(&dumped, 1u, __ATOMIC_RELAXED) >= 200u)
++      return;
++   char dir[1024], path[1100];
++   snprintf(dir, sizeof(dir), "%s/Library/Logs/kk-failed-msl", home);
++   mkdir(dir, 0755);
++   snprintf(path, sizeof(path), "%s/%08x.metal", dir, _mesa_hash_string(src));
++   FILE *f = fopen(path, "wx");
++   if (!f)
++      return;
++   fprintf(f, "/* %s */\n%s", err ? err : "", src);
++   fclose(f);
++   fprintf(stderr, "kk: failed MSL saved to %s\n", path);
++}
++
+ mtl_library *
+ mtl_new_library(mtl_compiler *compiler, const char *src,
+                 enum mtl_language_version msl_version,
+@@ -230,6 +255,7 @@ mtl_new_library(mtl_compiler *compiler, const char *src,
+ 
+       if (lib == nil) {
+          fprintf(stderr, "Failed to create MTLLibrary: %s\n", [error.localizedDescription UTF8String]);
++         mtl_dump_failed_msl(src, [error.localizedDescription UTF8String]);
+       }
+ 
+       return lib;

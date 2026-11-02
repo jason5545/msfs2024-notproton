@@ -1,0 +1,462 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: jason chien <3936511+jason5545@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 07:20:00 +0800
+Subject: [PATCH] kk: fragment shader interlock through Metal raster order
+ groups
+
+D3D12 rasterizer ordered views reach KosmicKrisp as
+SPV_EXT_fragment_shader_interlock (vkd3d-proton). nir_to_msl printed
+begin/end_invocation_interlock as "Unknown intrinsic", the MSL failed to
+compile in the background, vkEndCommandBuffer returned
+VK_ERROR_INVALID_SHADER_NV and the next vkQueueSubmit2 crashed.
+
+Metal has no critical section; it orders accesses made through resources
+declared [[raster_order_group(N)]]. With KosmicKrisp's bindless resources
+the attribute only takes effect on a parameter, and on pointers derived
+from that parameter: a texture handle cast from a plain address, or a
+struct member reached that way, is not ordered (measured on M5 Max: N
+overlapping fragments doing read+1+write, ordered only through a
+parameter). So a fragment shader that uses an interlock gets:
+
+- one parameter per storage texture type it loads,
+  constant KkRogTexN *kk_rog_tN [[buffer(3 + N)]], where KkRogTexN holds
+  the texture with [[raster_order_group(0)]], and every storage texture
+  handle is loaded as ((constant KkRogTexN*)((constant uchar*)kk_rog_tN
+  + (addr - (ulong)kk_rog_tN)))->t;
+- device uchar *kk_rog_g [[buffer(11), raster_order_group(0)]], and the
+  address of every device memory access is rebased onto it.
+
+The command buffer's argument table grows to 12 bindings and points the
+new ones at the sampler table: the parameters are only rebased onto,
+never read. All storage accesses of such a shader are ordered, not just
+those inside the interlock, which is stronger than required.
+
+VK_EXT_fragment_shader_interlock is advertised with pixel and sample
+interlock (raster order groups order per pixel, which covers samples).
+
+Applies on Mesa ce576c29ed + fxgl/steamac v1.9.7 kosmickrisp patches
+0001-0077.
+---
+ src/kosmickrisp/compiler/msl_private.h      |   7 ++
+ src/kosmickrisp/compiler/nir_to_msl.c       | 185 ++++++++++++++++++++++++++--
+ src/kosmickrisp/compiler/nir_to_msl.h       |  13 ++
+ src/kosmickrisp/vulkan/kk_cmd_buffer.c      |   9 +-
+ src/kosmickrisp/vulkan/kk_physical_device.c |   8 ++
+ 5 files changed, 208 insertions(+), 14 deletions(-)
+
+diff --git a/src/kosmickrisp/compiler/msl_private.h b/src/kosmickrisp/compiler/msl_private.h
+index 75da653..aa32871 100644
+--- a/src/kosmickrisp/compiler/msl_private.h
++++ b/src/kosmickrisp/compiler/msl_private.h
+@@ -8,6 +8,7 @@
+ 
+ #include "util/string_buffer.h"
+ #include "nir.h"
++#include "nir_to_msl.h"
+ 
+ struct io_slot_info {
+    nir_alu_type type;
+@@ -25,6 +26,12 @@ struct nir_to_msl_ctx {
+    struct _mesa_string_buffer *text;
+    uint64_t disabled_workarounds;
+    bool uses_per_draw_data;
++   /* Fragment shader interlock (D3D12 ROVs) through Metal raster order groups:
++    * storage texture handles and device memory are reached from parameters
++    * declared with [[raster_order_group(0)]] (see msl_gather_rog). */
++   bool rog;
++   unsigned rog_tex_count;
++   const char *rog_tex_types[MSL_ROG_MAX_TEXTURES];
+    unsigned short indentlevel;
+    struct io_slot_info inputs_info[NUM_TOTAL_VARYING_SLOTS];
+    struct io_slot_info outputs_info[NUM_TOTAL_VARYING_SLOTS];
+diff --git a/src/kosmickrisp/compiler/nir_to_msl.c b/src/kosmickrisp/compiler/nir_to_msl.c
+index 6ba5818..df73fc4 100644
+--- a/src/kosmickrisp/compiler/nir_to_msl.c
++++ b/src/kosmickrisp/compiler/nir_to_msl.c
+@@ -126,10 +126,19 @@ emit_inputs(struct nir_to_msl_ctx *ctx, nir_shader *shader)
+    P_IND(ctx, "constant SamplerTable &sampler_table [[buffer(1)]]");
+    if (ctx->uses_per_draw_data) {
+       P(ctx, ",\n");
+-      P_IND(ctx, "constant Buffer &per_draw [[buffer(2)]]\n");
+-   } else {
+-      P(ctx, "\n");
++      P_IND(ctx, "constant Buffer &per_draw [[buffer(2)]]");
+    }
++   if (ctx->rog) {
++      for (unsigned i = 0u; i < ctx->rog_tex_count; ++i) {
++         P(ctx, ",\n");
++         P_IND(ctx, "constant KkRogTex%u *kk_rog_t%u [[buffer(%u)]]", i, i,
++               MSL_ROG_TEX_BINDING_BASE + i);
++      }
++      P(ctx, ",\n");
++      P_IND(ctx, "device uchar *kk_rog_g [[buffer(%u), raster_order_group(0)]]",
++            MSL_ROG_GLOBAL_BINDING);
++   }
++   P(ctx, "\n");
+ }
+ 
+ static const char *
+@@ -863,6 +872,40 @@ image_coord_swizzle(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
+    texture_src_coord_swizzle(ctx, &instr->src[1], comps, is_cube, is_array);
+ }
+ 
++/* Fragment shader interlock: device memory accessed from a pointer derived from
++ * kk_rog_g, a parameter declared [[raster_order_group(0)]], is ordered between
++ * overlapping fragments. Rebase the address onto it (the cast back to a typed
++ * pointer keeps that provenance). constant memory is read-only and needs no
++ * ordering. */
++static bool
++global_addr_is_rog(struct nir_to_msl_ctx *ctx, const char *addressing)
++{
++   return ctx->rog && strstr(addressing, "device") != NULL;
++}
++
++static void
++global_addr_begin(struct nir_to_msl_ctx *ctx, const char *addressing)
++{
++   if (global_addr_is_rog(ctx, addressing))
++      P(ctx, "(kk_rog_g + ((ulong)(");
++}
++
++static void
++global_addr_end(struct nir_to_msl_ctx *ctx, const char *addressing)
++{
++   if (global_addr_is_rog(ctx, addressing))
++      P(ctx, ") - (ulong)kk_rog_g))");
++}
++
++static void
++global_addr_to_msl(struct nir_to_msl_ctx *ctx, nir_src *src,
++                   const char *addressing)
++{
++   global_addr_begin(ctx, addressing);
++   src_to_msl(ctx, src);
++   global_addr_end(ctx, addressing);
++}
++
+ /* Non-packed types have stricter alignment requirements that packed types.
+  * This helps us build a packed format for storage.
+  */
+@@ -893,7 +936,7 @@ src_to_packed_load(struct nir_to_msl_ctx *ctx, nir_src *src,
+    } else {
+       P(ctx, "%s(*(%s packed_%s*)", type, addressing, type);
+    }
+-   src_to_msl(ctx, src);
++   global_addr_to_msl(ctx, src, addressing);
+    P(ctx, ")");
+ }
+ 
+@@ -911,9 +954,11 @@ src_to_packed_load_offset(struct nir_to_msl_ctx *ctx, nir_src *src,
+    } else {
+       P(ctx, "%s(*(%s packed_%s*)(", type, addressing, type);
+    }
++   global_addr_begin(ctx, addressing);
+    src_to_msl(ctx, src);
+    P(ctx, " + ");
+    src_to_msl(ctx, offset);
++   global_addr_end(ctx, addressing);
+    P(ctx, "))");
+ }
+ 
+@@ -930,7 +975,7 @@ src_to_packed_store(struct nir_to_msl_ctx *ctx, nir_src *src,
+    } else {
+       P_IND(ctx, "(*(%s packed_%s*)", addressing, type);
+    }
+-   src_to_msl(ctx, src);
++   global_addr_to_msl(ctx, src, addressing);
+    P(ctx, ")");
+ }
+ 
+@@ -1063,13 +1108,13 @@ atomic_64bit_minmax_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *inst
+     * access, which has no such `if`. */
+    if (!nir_def_is_unused(&instr->def)) {
+       P_IND(ctx, "t%d = *(device %s*)(", instr->def.index, type);
+-      src_to_msl(ctx, &instr->src[0]);
++      global_addr_to_msl(ctx, &instr->src[0], "device");
+       P(ctx, ");\n");
+    }
+ 
+    P_IND(ctx, "%s_explicit((device atomic_%s*)", is_max ? "atomic_max" : "atomic_min",
+          type);
+-   src_to_msl(ctx, &instr->src[0]);
++   global_addr_to_msl(ctx, &instr->src[0], "device");
+    P(ctx, ", ");
+    src_to_msl(ctx, &instr->src[1]);
+    P(ctx, ", memory_order_relaxed);\n");
+@@ -1132,7 +1177,10 @@ atomic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr,
+      msl_type_for_def(ctx->types, &instr->def));
+    if (shared)
+       P(ctx, "&shared_data[%u + ", nir_intrinsic_base(instr));
+-   src_to_msl(ctx, &instr->src[0]);
++   if (shared)
++      src_to_msl(ctx, &instr->src[0]);
++   else
++      global_addr_to_msl(ctx, &instr->src[0], scope);
+    if (shared)
+       P(ctx, "]");
+    P(ctx, ", ");
+@@ -1154,7 +1202,10 @@ atomic_swap_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr,
+    P(ctx, "; %s_explicit((%s atomic_%s*)", atomic_op, scope, type);
+    if (shared)
+       P(ctx, "&shared_data[%u + ", nir_intrinsic_base(instr));
+-   src_to_msl(ctx, &instr->src[0]);
++   if (shared)
++      src_to_msl(ctx, &instr->src[0]);
++   else
++      global_addr_to_msl(ctx, &instr->src[0], scope);
+    if (shared)
+       P(ctx, "]");
+    P(ctx, ", ");
+@@ -1263,6 +1314,95 @@ msl_emit_texture_type(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
+    }
+ }
+ 
++/* The MSL type msl_emit_texture_type() prints, as a string. */
++static const char *
++msl_texture_type_string(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
++{
++   struct _mesa_string_buffer *text = ctx->text;
++   ctx->text = _mesa_string_buffer_create(text, 64);
++   msl_emit_texture_type(ctx, instr);
++   const char *type = ralloc_strdup(text, ctx->text->buf);
++   ralloc_free(ctx->text);
++   ctx->text = text;
++   return type;
++}
++
++/* Index of the raster order group table a storage texture handle is loaded
++ * through, or -1 when it is not (no interlock, a sampled texture, or more
++ * texture types than tables). */
++static int
++rog_texture_index(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
++{
++   if (!ctx->rog || instr->intrinsic != nir_intrinsic_load_texture_handle_kk ||
++       nir_intrinsic_flags(instr) == MSL_ACCESS_SAMPLE)
++      return -1;
++   const char *type = msl_texture_type_string(ctx, instr);
++   for (unsigned i = 0u; i < ctx->rog_tex_count; ++i) {
++      if (!strcmp(ctx->rog_tex_types[i], type))
++         return i;
++   }
++   return -1;
++}
++
++/* A fragment shader with an invocation interlock (SPV_EXT_fragment_shader_interlock,
++ * which vkd3d-proton uses for D3D12 rasterizer ordered views) gets raster order
++ * groups: every storage texture type it loads gets a table parameter, and its
++ * device memory a base parameter. Metal orders all accesses made through them,
++ * not just those between begin and end, which is stronger than required. */
++static void
++msl_gather_rog(struct nir_to_msl_ctx *ctx)
++{
++   if (ctx->shader->info.stage != MESA_SHADER_FRAGMENT)
++      return;
++   nir_function_impl *impl = nir_shader_get_entrypoint(ctx->shader);
++   nir_foreach_block(block, impl) {
++      nir_foreach_instr(instr, block) {
++         if (instr->type != nir_instr_type_intrinsic)
++            continue;
++         nir_intrinsic_op op = nir_instr_as_intrinsic(instr)->intrinsic;
++         if (op == nir_intrinsic_begin_invocation_interlock ||
++             op == nir_intrinsic_end_invocation_interlock)
++            ctx->rog = true;
++      }
++   }
++   if (!ctx->rog)
++      return;
++
++   bool overflow = false;
++   nir_foreach_block(block, impl) {
++      nir_foreach_instr(instr, block) {
++         if (instr->type != nir_instr_type_intrinsic)
++            continue;
++         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
++         if (intr->intrinsic != nir_intrinsic_load_texture_handle_kk ||
++             nir_intrinsic_flags(intr) == MSL_ACCESS_SAMPLE)
++            continue;
++         const char *type = msl_texture_type_string(ctx, intr);
++         bool found = false;
++         for (unsigned i = 0u; i < ctx->rog_tex_count; ++i)
++            found |= !strcmp(ctx->rog_tex_types[i], type);
++         if (found)
++            continue;
++         if (ctx->rog_tex_count == MSL_ROG_MAX_TEXTURES) {
++            overflow = true;
++            continue;
++         }
++         ctx->rog_tex_types[ctx->rog_tex_count++] = type;
++      }
++   }
++   if (overflow)
++      fprintf(stderr, "kk: fragment interlock uses more than %u storage texture "
++                      "types, the rest are not ordered\n", MSL_ROG_MAX_TEXTURES);
++}
++
++static void
++msl_emit_rog_types(struct nir_to_msl_ctx *ctx)
++{
++   for (unsigned i = 0u; i < ctx->rog_tex_count; ++i)
++      P(ctx, "struct KkRogTex%u { %s t [[raster_order_group(0)]]; };\n", i,
++        ctx->rog_tex_types[i]);
++}
++
+ static const char *
+ global_access_qualifier(struct nir_to_msl_ctx *ctx,
+                         enum gl_access_qualifier access)
+@@ -1551,7 +1691,7 @@ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
+          assert(instr->num_components == 1u &&
+                 "We can only do single component with atomics");
+          P(ctx, "atomic_load_explicit((%s atomic_%s*)", qualifier, type);
+-         src_to_msl(ctx, &instr->src[0]);
++         global_addr_to_msl(ctx, &instr->src[0], qualifier);
+          P(ctx, ", memory_order_relaxed);\n");
+       } else {
+          src_to_packed_load(ctx, &instr->src[0], qualifier, type,
+@@ -1586,9 +1726,11 @@ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
+          assert(instr->num_components == 1u &&
+                 "We can only do single component with atomics");
+          P(ctx, "atomic_load_explicit((%s atomic_%s*)(", qualifier, type);
++         global_addr_begin(ctx, qualifier);
+          src_to_msl(ctx, &instr->src[0]);
+          P(ctx, "+");
+          src_to_msl(ctx, &instr->src[1]);
++         global_addr_end(ctx, qualifier);
+          P(ctx, ", memory_order_relaxed);\n");
+       } else {
+          src_to_packed_load_offset(ctx, &instr->src[0], &instr->src[1],
+@@ -1619,7 +1761,7 @@ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
+          assert(instr->num_components == 1u &&
+                 "We can only do single component with atomics");
+          P_IND(ctx, "atomic_store_explicit((%s atomic_%s*)", qualifier, type);
+-         src_to_msl(ctx, &instr->src[1]);
++         global_addr_to_msl(ctx, &instr->src[1], qualifier);
+          P(ctx, ", ")
+          src_to_packed(ctx, &instr->src[0], type,
+                        instr->src[0].ssa->num_components);
+@@ -1767,13 +1909,29 @@ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
+       P(ctx, ";\n");
+       break;
+    case nir_intrinsic_load_texture_handle_kk:
+-   case nir_intrinsic_load_depth_texture_kk:
++   case nir_intrinsic_load_depth_texture_kk: {
++      int rog = rog_texture_index(ctx, instr);
++      if (rog >= 0) {
++         /* Through the raster order group table of this texture type. */
++         P(ctx, "((constant KkRogTex%d*)((constant uchar*)kk_rog_t%d + ((ulong)(",
++           rog, rog);
++         src_to_msl(ctx, &instr->src[0]);
++         P(ctx, ") - (ulong)kk_rog_t%d)))->t;\n", rog);
++         break;
++      }
+       P(ctx, "*(constant ");
+       msl_emit_texture_type(ctx, instr);
+       P(ctx, "*)");
+       src_to_msl(ctx, &instr->src[0]);
+       P(ctx, ";\n");
+       break;
++   }
++   case nir_intrinsic_begin_invocation_interlock:
++   case nir_intrinsic_end_invocation_interlock:
++      /* Metal has no critical section: ordering comes from the raster order
++       * group parameters the accesses go through (msl_gather_rog). */
++      P_IND(ctx, "// %s\n", nir_intrinsic_infos[instr->intrinsic].name);
++      break;
+    case nir_intrinsic_load_sampler_handle_kk:
+       P(ctx, "sampler_table.handles[");
+       src_to_msl(ctx, &instr->src[0]);
+@@ -3066,6 +3224,8 @@ msl_gather_info(struct nir_to_msl_ctx *ctx, struct nir_to_msl_options *options)
+          }
+       }
+    }
++
++   msl_gather_rog(ctx);
+ }
+ 
+ /* Fetches split by msl_lower_sparse_fetches: their residency goes to tr<def> */
+@@ -3204,6 +3364,7 @@ nir_to_msl(nir_shader *shader, struct nir_to_msl_options *options)
+    msl_emit_constant_data(&ctx, shader);
+ 
+    msl_emit_io_blocks(&ctx, shader);
++   msl_emit_rog_types(&ctx);
+    if (shader->info.stage == MESA_SHADER_FRAGMENT &&
+        shader->info.fs.early_fragment_tests)
+       P(&ctx, "[[early_fragment_tests]]\n");
+diff --git a/src/kosmickrisp/compiler/nir_to_msl.h b/src/kosmickrisp/compiler/nir_to_msl.h
+index 136fd29..940bc85 100644
+--- a/src/kosmickrisp/compiler/nir_to_msl.h
++++ b/src/kosmickrisp/compiler/nir_to_msl.h
+@@ -19,6 +19,19 @@
+  * backend2 = float4 custom border. Footprint processing is out-of-line. */
+ #define MSL_TEX_FLAG_MINMAX (1u << 30)
+ 
++/* Fragment shader interlock: a fragment shader that begins an invocation
++ * interlock reaches its storage textures through up to MSL_ROG_MAX_TEXTURES
++ * parameters at buffer(MSL_ROG_TEX_BINDING_BASE + i), one per texture type, and
++ * its device memory through a parameter at buffer(MSL_ROG_GLOBAL_BINDING); all
++ * are declared [[raster_order_group(0)]]. Metal only orders accesses made
++ * through such parameters, so the address of every access is rebased onto the
++ * parameter. The parameters are never dereferenced themselves: the command
++ * buffer binds any valid address there. */
++#define MSL_ROG_TEX_BINDING_BASE 3u
++#define MSL_ROG_MAX_TEXTURES     8u
++#define MSL_ROG_GLOBAL_BINDING   (MSL_ROG_TEX_BINDING_BASE + MSL_ROG_MAX_TEXTURES)
++#define MSL_ROG_BINDING_COUNT    (MSL_ROG_GLOBAL_BINDING + 1u)
++
+ enum pipe_format;
+ struct vk_input_attachment_location_state;
+ struct vk_color_attachment_location_state;
+diff --git a/src/kosmickrisp/vulkan/kk_cmd_buffer.c b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+index 0e00989..ce25e83 100644
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+@@ -20,6 +20,7 @@
+ #include "kosmickrisp/bridge/mtl_device.h"
+ #include "kosmickrisp/bridge/mtl_encoder.h"
+ #include "kosmickrisp/bridge/vk_to_mtl_map.h"
++#include "kosmickrisp/compiler/nir_to_msl.h"
+ 
+ #include "vk_alloc.h"
+ #include "vk_common_entrypoints.h"
+@@ -166,10 +167,14 @@ kk_create_cmd_buffer(struct vk_command_pool *vk_pool,
+ 
+    {
+       mtl_argument_table_descriptor *desc = mtl_new_argument_table_descriptor();
+-      /* Root at 0, samplers at 1 and per draw data at 2 */
+-      mtl_set_max_buffer_binding_count(desc, 3u);
++      /* Root at 0, samplers at 1 and per draw data at 2, then the raster
++       * order group parameters of fragment interlock shaders (nir_to_msl.h).
++       * Those are only rebased onto, never read, so any valid address does. */
++      mtl_set_max_buffer_binding_count(desc, MSL_ROG_BINDING_COUNT);
+       cmd->argument_table = mtl_new_argument_table(dev->mtl_handle, desc);
+       mtl_set_address(cmd->argument_table, dev->samplers.table.bo->gpu, 1u);
++      for (uint32_t i = MSL_ROG_TEX_BINDING_BASE; i < MSL_ROG_BINDING_COUNT; ++i)
++         mtl_set_address(cmd->argument_table, dev->samplers.table.bo->gpu, i);
+       mtl_release(desc);
+    }
+ 
+diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
+index f1992a6..f749496 100644
+--- a/src/kosmickrisp/vulkan/kk_physical_device.c
++++ b/src/kosmickrisp/vulkan/kk_physical_device.c
+@@ -189,6 +189,7 @@ kk_get_device_extensions(const struct kk_instance *instance,
+       .EXT_depth_clip_enable = true,
+       .EXT_extended_dynamic_state3 = true,
+       .EXT_external_memory_metal = true,
++      .EXT_fragment_shader_interlock = true,
+       .EXT_external_memory_host = true,
+       .EXT_hdr_metadata = true,
+       .EXT_image_2d_view_of_3d = true,
+@@ -505,6 +506,13 @@ kk_get_device_features(
+       .extendedDynamicState3SampleLocationsEnable = true,
+       .extendedDynamicState3TessellationDomainOrigin = true,
+ 
++      /* VK_EXT_fragment_shader_interlock: Metal raster order groups order
++       * overlapping fragments per pixel, in primitive order (nir_to_msl.c,
++       * msl_gather_rog), which covers per-sample interlock too. */
++      .fragmentShaderPixelInterlock = true,
++      .fragmentShaderSampleInterlock = true,
++      .fragmentShaderShadingRateInterlock = false,
++
+       /* EXT_image_2d_view_of_3d */
+       .image2DViewOf3D = true,
+       .sampler2DViewOf3D = true,

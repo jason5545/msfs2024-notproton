@@ -1,0 +1,37 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: jason chien <3936511+jason5545@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 07:35:00 +0800
+Subject: [PATCH] kk: drop the draw of a program that failed to compile, keep the command buffer
+
+A graphics or compute program whose background Metal compile failed set
+VK_ERROR_INVALID_SHADER_NV on the command buffer, so vkEndCommandBuffer
+returned it. vkd3d-proton only logs that result and submits the command
+buffer anyway, which crashed in vkQueueSubmit2 (Exception 0xc0000005 in
+Unix call) and hung MSFS 2024 when it started a flight. Drop only the
+draw or dispatch, as before, and report it on stderr (first 32 times).
+
+Applies after 0001.
+---
+diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+index af97042..c0bceca 100644
+--- a/src/kosmickrisp/vulkan/kk_shader.c
++++ b/src/kosmickrisp/vulkan/kk_shader.c
+@@ -3186,7 +3186,17 @@ kk_cmd_shader_pipeline(struct kk_cmd_buffer *cmd, struct kk_shader *shader,
+          /* The pipeline's other program may still be ready */
+          struct kk_shader *other = program == shader ? shader->minmax : shader;
+          if (other == NULL || !p_atomic_read(&other->pipeline_ready)) {
+-            vk_command_buffer_set_error(&cmd->vk, result);
++            /* Only the draw or dispatch is dropped. Failing the command
++             * buffer made vkEndCommandBuffer return the error, and
++             * vkd3d-proton submits such a command buffer anyway, which
++             * crashed in vkQueueSubmit2 and hung MSFS 2024. */
++            static unsigned reported;
++            if (p_atomic_inc_return(&reported) <= 32u)
++               fprintf(stderr, "kk: dropping a %s whose program failed to "
++                               "compile (%d)\n",
++                       shader->vk.stage == MESA_SHADER_COMPUTE ? "dispatch"
++                                                                : "draw",
++                       result);
+             return NULL;
+          }
+          program = other;

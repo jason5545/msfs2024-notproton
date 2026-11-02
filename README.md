@@ -1,5 +1,7 @@
 # MSFS 2024 在 Apple Silicon Mac 上：NotProton 路線
 
+**正體中文** | [English](README.en.md)
+
 讓 Microsoft Flight Simulator 2024（Steam 版）在 Apple Silicon Mac 上跑起來的修正與工具。用的是 [NotProton](https://github.com/NotProtonNot/NotProton)（macOS 原生 Steam 的 Steam Play，底下是 CrossOver 27 Preview 的 arm64 Wine 加 FEX ARM64EC）。
 
 做法是把幾個開放原始碼元件從原始碼自己編，透過 NotProton 的 runner variant 疊進 runner 複本。CrossOver 的原檔不改，遊戲檔案也不動。
@@ -54,12 +56,12 @@ D3D 這層靠 NotProton 的外掛（`NOTPROTON_STEAMAC=1`，設定在 [`config/n
 
 - 遊戲每格都用 x86 硬體除錯暫存器設執行斷點，FEX ARM64EC 原本不支援，要自己補。
 - 補上之後還有一個問題：例外處理（VEH）改了 RIP 之後，FEX 沒清掉 RF 記號，下一次命中同一組斷點時被吞掉，接著存取違規。
-- 修在 FEX `steamac-darwin` 分支。`tools/dr-test/`、`tools/eh-test/` 是對應的測試程式。
+- 修正在 `patches/fex/` 的 0001（執行斷點）和 0005（RF）。`tools/dr-test/`、`tools/eh-test/` 是對應的測試程式。
 
 ### 4. 載入時「四槽斷點」那段很慢
 
 - 載入中有一段會反覆命中四個斷點約 700 輪，每輪都牽涉自我修改程式碼（SMC）。ARM64EC 的 FEX 每次 SMC 都要走一次頁故障，一輪約 0.8 秒，整段要 9 分鐘左右。
-- 把在 Linux 版 FEX 做過的「熱頁」（同一頁故障太多次就改成逐指令檢查）搬到 ARM64EC 之後，698 輪 85.8 秒跑完。`tools/smc-test/` 量單次 SMC 的成本。
+- 把在 Linux 版 FEX 做過的「熱頁」（同一頁故障太多次就改成逐指令檢查）搬到 ARM64EC 之後，698 輪 85.8 秒跑完（`patches/fex/` 的 0006）。`tools/smc-test/` 量單次 SMC 的成本。
 
 ## FEX 的修改
 

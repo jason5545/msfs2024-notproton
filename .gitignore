@@ -15,3 +15,6 @@ tools/*/out/
 *.so
 *.dylib
 .DS_Store
+
+# 控制前景、截圖的測試腳本只放本機
+/tools/video/

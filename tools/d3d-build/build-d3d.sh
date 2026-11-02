@@ -1,15 +1,15 @@
 #!/bin/bash
-# build-d3d.sh <dxvk|vkd3d> <name> — cross-builds the DXVK or vkd3d-proton fork (forks/*-steamac, whatever is checked
+# build-d3d.sh <dxvk|vkd3d> <name> — cross-builds the DXVK or vkd3d-proton fork ($FORKS/*-steamac, default ~/GitHub/msfs-src/forks; whatever is checked
 # out there) for Windows x86-64 with brew's mingw-w64 + meson, release, stripped, the way their package-release.sh
 # does. Build tree: ~/GitHub/msfs-src/d3d-build/<name>/build; DLLs: ~/GitHub/msfs-src/d3d-build/<name>/x64.
 # Runs under nice with JOBS (default 6) jobs. Reconfigures only if the build tree is missing.
 set -euo pipefail
 WHAT=$1; NAME=$2
-R=$(cd "$(dirname "$0")/../.." && pwd)
+FORKS=${FORKS:-$HOME/GitHub/msfs-src/forks}
 OUT=$HOME/GitHub/msfs-src/d3d-build/$NAME
 case $WHAT in
-  dxvk)  SRC=$R/forks/dxvk-steamac;         OPTS=(-Db_ndebug=if-release -Denable_d3d8=false -Denable_d3d9=false) ;;
-  vkd3d) SRC=$R/forks/vkd3d-proton-steamac; OPTS=(-Denable_tests=false -Denable_extras=false) ;;
+  dxvk)  SRC=$FORKS/dxvk-steamac;       OPTS=(-Db_ndebug=if-release -Denable_d3d8=false -Denable_d3d9=false) ;;
+  vkd3d) SRC=$FORKS/vkd3d-proton-steamac; OPTS=(-Denable_tests=false -Denable_extras=false) ;;
   *) echo "usage: $0 <dxvk|vkd3d> <name>" >&2; exit 2 ;;
 esac
 mkdir -p "$OUT"

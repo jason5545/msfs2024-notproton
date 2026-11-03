@@ -11,7 +11,8 @@
 ## 現況（2026/11/3）
 
 - NotProton 路線（到 11/3 中午）：從開機走到 Xbox 自動登入、世界地圖，按「開始飛行」進到機場，駕駛艙畫面正常，停在跑道上約 16 FPS。還沒起飛。
-- 換到 Hadron 之後：runtime 編好、整套回歸測試過了（Hadron 自己的 `check-runtime.sh` 8 項、Highball 的 x64 忠實度測試數字跟它的 README 一致、我們的除錯暫存器／例外／SMC／TSO／憑證／DPAPI 測試、D3D12 與 D3D11↔D3D12 共用貼圖在 KosmicKrisp 上逐像素一致），Steam 也接上了。**還沒用 Hadron 開過遊戲。**
+- 換到 Hadron 之後：runtime 編好、整套回歸測試過了（Hadron 自己的 `check-runtime.sh` 8 項、Highball 的 x64 忠實度測試數字跟它的 README 一致、我們的除錯暫存器／例外／SMC／TSO／憑證／DPAPI 測試、D3D12 與 D3D11↔D3D12 共用貼圖在 KosmicKrisp 上逐像素一致），Steam 也接上了。
+- 11/3 下午第一次用 Hadron 開遊戲：Xbox 自動登入，載入畫面沒有條紋，開遊戲到標題畫面約 9 分鐘。Free Flight 選 A330-200、桃園 RCTP 05R，按「開始飛行」不到兩分鐘進到駕駛艙，畫面正常、儀表在走，停在跑道上約 30 FPS（主選單約 60 FPS）。從主選單 Quit to Desktop 正常結束。整輪都是背景模式，見下面「背景模式」。
 
 ## 環境
 
@@ -49,11 +50,21 @@ CX_GRAPHICS_BACKEND=vkd3d NOTPROTON_ENV_JSC_useJIT=false %command%
 
 `CX_GRAPHICS_BACKEND` 對應 `HADRON_GRAPHICS`，`NOTPROTON_ENV_<名稱>` 對應 `HADRON_ENV_<名稱>`（已經有 Hadron 名稱的優先）。MSFS（2537590）在 arm64 runtime 上自動帶 Highball 的 MSFS SMC 設定（`HB_FEX_SMC_RETIRE=1 HB_FEX_SMC_SKIP_SAME=1 HB_FEX_SMC_HOT_MAXINST=64 HB_FEX_VM_FASTPATH=1 HB_FEX_SMC_DEFER_CALLRET=1`），啟動選項有設的優先。
 
-DXVK 和 vkd3d-proton 跟遊戲在同一個行程裡。編成 ARM64EC 之後遊戲照樣當 x64 DLL 載入，裡面的程式碼直接跑原生 ARM64，D3D 轉 Vulkan 這一步不用再跟遊戲一起在 FEX 裡模擬。離線測試（`tools/d3d-bench/`）：D3D12 錄每次 draw 的時間少約 7–16%，第一次建 PSO 快很多（8 條執行緒同時建 96 個：x64 0.6–1 秒、ARM64EC 0.03 秒）；代價是每次呼叫都要跨一次 x64／ARM64EC 的邊界，D3D11 這種一次只做一點事的呼叫反而慢（約 50 → 190 ns）。**ARM64EC 這組還沒在遊戲裡驗。**
+DXVK 和 vkd3d-proton 跟遊戲在同一個行程裡。編成 ARM64EC 之後遊戲照樣當 x64 DLL 載入，裡面的程式碼直接跑原生 ARM64，D3D 轉 Vulkan 這一步不用再跟遊戲一起在 FEX 裡模擬。離線測試（`tools/d3d-bench/`）：D3D12 錄每次 draw 的時間少約 7–16%，第一次建 PSO 快很多（8 條執行緒同時建 96 個：x64 0.6–1 秒、ARM64EC 0.03 秒）；代價是每次呼叫都要跨一次 x64／ARM64EC 的邊界，D3D11 這種一次只做一點事的呼叫反而慢（約 50 → 190 ns）。11/3 遊戲在 Hadron 上用的就是 ARM64EC 這組，主選單和駕駛艙都畫得正常；跟 x64 版在遊戲裡的 FPS 還沒比過。
+
+## 背景模式（自動化測試用）
+
+開遊戲測試時，遊戲畫面不能出現在使用者的螢幕上，也不能搶走鍵盤焦點，因為使用者同時在用這台 Mac。做法分三層：
+
+- **Wine（0056）**：`HADRON_MAC_BACKGROUND=1` 時，視窗一建立就放在最低的視窗層（桌面圖層底下），還在螢幕上，所以照常畫、`screencapture -l` 截得到；程式永遠不自己啟用、不取消隱藏，不動、不鎖主機游標，不改解析度，按鍵不經 macOS 輸入法。
+- **Hadron `compat_run.sh`**：啟動選項 `HADRON_MAC_BACKGROUND=1`，或一次性請求檔 `~/Library/Application Support/hadron/background/<AppID>`（10 分鐘內有效）。設好之後才跑任何 Wine 程序（prefix 更新的 wineboot 也藏住），`open -g` 啟動、不開 Hadron 的啟動視窗。Steam 開遊戲之前會先跑一次安裝腳本（`iscriptevaluator.exe`，verb `run`），那次也走背景，但請求留給遊戲本身那次（`waitforexitandrun`）拿；11/3 第一次試的時候請求被安裝腳本先用掉，遊戲變成正常模式出現在畫面上（fork `56dcd8b` 修掉）。
+- **輸入**：從 Wine 內部送硬體輸入（一支小的 Windows 程式加入遊戲的 wineserver，透過 win32u 的 `SendHardwareInput` 送，跟 winemac 轉送 Mac 輸入走同一條路），不動 Mac 的游標和前景。MSFS 的按鈕要先 hover，移動兩次再點就按得到；搜尋框打字也收得到。監看程式每 30 ms 檢查遊戲和 Steam 的視窗，有視窗跑到桌面之上就立刻藏起來、搶走前景就還回去。這部分工具只放本機，不在 repo 裡。
+
+11/3 一整輪（開遊戲、登入、主選單、Free Flight、進駕駛艙、退出）遊戲視窗 0 次出現在畫面上、0 次搶前景。還沒解決的：Steam 收到開遊戲的指令時會自己叫出主視窗，現在靠監看程式立刻藏起來，開頭仍會閃一下。
 
 ## 修掉的問題
 
-下面 1–5 是 NotProton 路線上查到、修好的。換到 Hadron 後，每一項怎麼處理寫在各段最後。
+下面 1–5 是 NotProton 路線上查到、修好的。換到 Hadron 後，每一項怎麼處理寫在各段最後。11/3 在 Hadron 上開遊戲，1、2、3、5 都沒再出現（Xbox 自動登入、沒有條紋、過了 8/22、按開始飛行進到駕駛艙）。
 
 ### 1. Xbox 每次重開都要重新登入
 

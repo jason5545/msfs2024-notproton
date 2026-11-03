@@ -11,7 +11,8 @@ The name is squawk (a transponder code) plus quark (what hadrons are made of); a
 ## Status (2026-11-03)
 
 - NotProton route (until midday Nov 3): the game ran from start through automatic Xbox sign-in and the world map; after pressing "Fly" it reached the airport with a correctly rendered cockpit, sitting on the runway at about 16 FPS. No actual flight yet.
-- After the switch to Hadron: the runtime is built and passes the full regression set (Hadron's own `check-runtime.sh`, 8 checks; Highball's x64-fidelity tests with the numbers its README lists; our debug-register, exception, SMC, TSO, credential and DPAPI tests; D3D12 and D3D11↔D3D12 shared textures on KosmicKrisp, pixel-identical), and Steam is hooked up. **The game has not been launched on Hadron yet.**
+- After the switch to Hadron: the runtime is built and passes the full regression set (Hadron's own `check-runtime.sh`, 8 checks; Highball's x64-fidelity tests with the numbers its README lists; our debug-register, exception, SMC, TSO, credential and DPAPI tests; D3D12 and D3D11↔D3D12 shared textures on KosmicKrisp, pixel-identical), and Steam is hooked up.
+- First launch on Hadron, the afternoon of Nov 3: automatic Xbox sign-in, no stripes on the loading screen, about 9 minutes from launch to the title screen. Free Flight with the A330-200 at Taoyuan RCTP 05R: "Start flight" reached the cockpit in under two minutes, rendered correctly with the instruments running, at about 30 FPS on the runway (about 60 FPS in the main menu). Quit to Desktop from the main menu ended it cleanly. The whole run was in background mode, see "Background mode" below.
 
 ## Environment
 
@@ -49,11 +50,21 @@ CX_GRAPHICS_BACKEND=vkd3d NOTPROTON_ENV_JSC_useJIT=false %command%
 
 `CX_GRAPHICS_BACKEND` maps to `HADRON_GRAPHICS` and `NOTPROTON_ENV_<name>` to `HADRON_ENV_<name>` (a Hadron name already set wins). On the arm64 runtime MSFS (2537590) automatically gets Highball's MSFS SMC settings (`HB_FEX_SMC_RETIRE=1 HB_FEX_SMC_SKIP_SAME=1 HB_FEX_SMC_HOT_MAXINST=64 HB_FEX_VM_FASTPATH=1 HB_FEX_SMC_DEFER_CALLRET=1`); launch options win.
 
-DXVK and vkd3d-proton run in the game's process. Built for ARM64EC, the game still loads them as x64 DLLs, but their code runs as native ARM64, so translating D3D to Vulkan no longer has to be emulated in FEX along with the game. Offline tests (`tools/d3d-bench/`): recording a D3D12 draw takes about 7–16% less time, and first-time PSO creation is much faster (96 PSOs from 8 threads: 0.6–1 s for x64, 0.03 s for ARM64EC). The cost is one x64/ARM64EC boundary crossing per call, so small D3D11 calls get slower (about 50 → 190 ns). **The ARM64EC build has not been tried in the game yet.**
+DXVK and vkd3d-proton run in the game's process. Built for ARM64EC, the game still loads them as x64 DLLs, but their code runs as native ARM64, so translating D3D to Vulkan no longer has to be emulated in FEX along with the game. Offline tests (`tools/d3d-bench/`): recording a D3D12 draw takes about 7–16% less time, and first-time PSO creation is much faster (96 PSOs from 8 threads: 0.6–1 s for x64, 0.03 s for ARM64EC). The cost is one x64/ARM64EC boundary crossing per call, so small D3D11 calls get slower (about 50 → 190 ns). On Nov 3 the game ran on Hadron with this ARM64EC build, and the main menu and cockpit render correctly; in-game FPS has not been compared with the x64 build yet.
+
+## Background mode (for automated tests)
+
+While the game is being tested, it must not show up on the user's screen or take the keyboard focus, because the user is working on the same Mac at the time. Three layers:
+
+- **Wine (0056)**: with `HADRON_MAC_BACKGROUND=1`, every window is put on the lowest window level (under the desktop picture) as soon as it is created. It is still on screen, so it keeps drawing and `screencapture -l` can capture it. The program never activates or unhides itself, never moves or confines the host cursor, never changes display modes, and key presses skip the macOS input method.
+- **Hadron's `compat_run.sh`**: the launch option `HADRON_MAC_BACKGROUND=1`, or a one-shot request file `~/Library/Application Support/hadron/background/<AppID>` (valid for 10 minutes). It is set before any Wine process runs (so a prefix update's wineboot stays hidden too); the game is started with `open -g` and Hadron's launch window stays shut. Before the game, Steam runs an install script (`iscriptevaluator.exe`, verb `run`); that run goes in the background as well, but leaves the request for the game's own run (`waitforexitandrun`). On the first try on Nov 3 the install script used up the request and the game came up in the normal mode, on screen (fixed in fork `56dcd8b`).
+- **Input**: hardware input sent from inside Wine (a small Windows program joins the game's wineserver and sends it through win32u's `SendHardwareInput`, the path winemac uses for the Mac's own input), without touching the Mac's cursor or foreground. MSFS buttons need a hover first: two moves and then a click work, and typing into search fields works. A watcher checks the game's and Steam's windows every 30 ms, hides any that gets above the desktop and gives a stolen foreground back. These tools are kept locally, not in the repo.
+
+Over a full run on Nov 3 (launch, sign-in, main menu, Free Flight, cockpit, quit) the game window appeared on screen 0 times and took the foreground 0 times. Still open: when Steam gets the launch request it brings up its own main window; the watcher hides it at once, but it still flashes at the start.
 
 ## Problems fixed
 
-Items 1–5 were found and fixed on the NotProton route. How each is handled on Hadron is noted at the end of each item.
+Items 1–5 were found and fixed on the NotProton route. How each is handled on Hadron is noted at the end of each item. On the Nov 3 launch on Hadron, 1, 2, 3 and 5 did not come back (automatic Xbox sign-in, no stripes, past 8/22, "Start flight" reaches the cockpit).
 
 ### 1. Xbox sign-in required on every launch
 

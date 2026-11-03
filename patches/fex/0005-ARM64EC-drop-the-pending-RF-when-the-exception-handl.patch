@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: jason chien <3936511+jason5545@users.noreply.github.com>
 Date: Mon, 2 Nov 2026 20:36:45 +0800
-Subject: [PATCH 5/6] ARM64EC: drop the pending RF when the exception handler
+Subject: [PATCH 5/7] ARM64EC: drop the pending RF when the exception handler
  resumes somewhere other than the breakpoint
 
 A breakpoint hit records HWBreakpointResumeRIP because RF does not survive Wine's ARM64EC context conversion, and the

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: jason chien <3936511+jason5545@users.noreply.github.com>
 Date: Mon, 2 Nov 2026 21:12:26 +0800
-Subject: [PATCH 6/6] FEXCore, ARM64EC: adaptive per-page SMC handling (hot
+Subject: [PATCH 6/7] FEXCore, ARM64EC: adaptive per-page SMC handling (hot
  pages)
 
 Port of steamac-dr 8035502f2 (0005) and a26b7d158 (0006) from the Linux

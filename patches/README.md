@@ -28,7 +28,7 @@ Metal 只對「透過帶 `raster_order_group` 屬性的參數」做的存取保�
 
 ## fex/
 
-依序套在上游 FEX main `02e24ca5c`，結果等於 fork 分支 `steamac-darwin` 的 `c33b6a5e9`。
+依序套在上游 FEX main `02e24ca5c`，結果等於 fork 分支 `steamac-darwin` 的 `995db7b36`。
 
 | 檔案 | 內容 |
 |---|---|
@@ -36,6 +36,7 @@ Metal 只對「透過帶 `raster_order_group` 屬性的參數」做的存取保�
 | `0002`–`0004` `…STEAMAC_EXCLOG…` | 只記錄：`STEAMAC_EXCLOG=1` 時記下交給遊戲的例外、遊戲堆疊、主程式頭幾次存取違規的暫存器與可讀字串 |
 | `0005-…drop-the-pending-RF…` | 例外處理把執行位置改到別處時清掉待處理的 RF，否則下一次命中同一個斷點會被吞掉 |
 | `0006-…adaptive-per-page-SMC…` | SMC 熱頁：同一頁寫入故障太頻繁就不再防寫，改成從那頁編出的指令執行前逐條檢查自己的位元組（`STEAMAC_SMC_HOT=0` 關閉，`STEAMAC_SMCSTATS=1` 印統計） |
+| `0007-…hardware-TSO-on-macOS…` | unixlib 可以在 macOS 編：`SetHardwareTSOControl` 呼叫 `thread_set_x86_64_compat()`（macOS 26 SDK 的公開函式，Wine 的 loader 有它要的權限），其他只有 Linux 有的控制回 `STATUS_NOT_SUPPORTED`；這個開關只管呼叫它的執行緒，所以 `ThreadInit` 每條新執行緒都再開一次。沒有這個 unixlib 時 FEX 用軟體模擬 x86 記憶體順序（`tools/tso-bench`） |
 
 只支援執行斷點，watchpoint 沒做。x64 程式碼直接呼叫 `NtSetContextThread` 的 syscall thunk 時拿不到除錯暫存器，現在只涵蓋經過 kernel32／kernelbase `SetThreadContext` 的路徑。
 
@@ -51,5 +52,12 @@ ninja -C build arm64ecfex
 ```
 
 產物 `build/Bin/libarm64ecfex.dll` 就是 `xtajit64.dll`。Python 要裝 `setuptools<81`。
+
+unixlib（runner 的 `lib/wine/aarch64-unix/libarm64ecfex.so`，取代 CrossOver 的；CrossOver 那份的呼叫編號跟上游不同）用 Xcode 的 clang 編，見 `tools/fex-unixlib/build.sh`：
+
+```sh
+xcrun clang++ -std=c++20 -O2 -arch arm64 -mmacosx-version-min=26.0 -shared -fPIC \
+  -o libarm64ecfex.so FEX/Source/Windows/UnixLib/FEXUnixLib.cpp
+```
 
 AI 協助寫的，不送 FEX 上游（上游 `CONTRIBUTING.md` 不收 AI 產生的程式碼）。

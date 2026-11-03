@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: jason chien <3936511+jason5545@users.noreply.github.com>
 Date: Mon, 2 Nov 2026 19:30:19 +0800
-Subject: [PATCH 3/6] ARM64EC: STEAMAC_EXCLOG also walks the guest stack for
+Subject: [PATCH 3/7] ARM64EC: STEAMAC_EXCLOG also walks the guest stack for
  the first non-single-step exceptions
 
 Logs every frame the way call_seh_handlers unwinds it (RtlLookupFunctionEntry + RtlVirtualUnwind on the x64 context)

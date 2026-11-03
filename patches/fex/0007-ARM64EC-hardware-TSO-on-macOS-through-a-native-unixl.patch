@@ -1,0 +1,168 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: jason chien <3936511+jason5545@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 11:15:11 +0800
+Subject: [PATCH 7/7] ARM64EC: hardware TSO on macOS through a native unixlib
+
+Without a unix library our ARM64EC FEX on CrossOver 27 emulated x86 memory
+ordering in software (ordered loads and stores on every non-stack access).
+CodeWeavers' build gets hardware TSO from its own unixlib, and steamac's
+Linux VM had it through PR_SET_MEM_MODEL.
+
+FEXUnixLib builds on macOS: SetHardwareTSOControl calls
+thread_set_x86_64_compat() (public in the macOS 26 SDK; Wine's loader
+carries the cross-architecture-support entitlement it needs). The other
+controls are Linux-only and report STATUS_NOT_SUPPORTED there; MapFile and
+GetPID work as before.
+
+thread_set_x86_64_compat() covers only the calling thread, while the JIT
+drops software TSO for the whole process once the first call succeeds, so
+ThreadInit now enables it on every new thread as well. Without that, a
+message-passing litmus test between two guest threads showed 2.5e8
+violations in 5e8 reads.
+
+tools/tso-bench on CrossOver 27 Preview: litmus violations 0; independent
+load loop 0.242 -> 0.113 ns/word, copy loop 0.310 -> 0.227 ns/word (same
+as CodeWeavers' FEX with its unixlib and as TSOEnabled=0). smctest,
+drtest, ehtest (all, dr, onlyskip) pass.
+
+steamac local patch (msfs2024-notproton patches/fex/). Not for upstream.
+---
+ Source/Windows/ARM64EC/Module.cpp        |  7 ++++++
+ Source/Windows/Common/TSOHandlerConfig.h |  8 +++++++
+ Source/Windows/UnixLib/CMakeLists.txt    |  4 +++-
+ Source/Windows/UnixLib/FEXUnixLib.cpp    | 30 +++++++++++++++++++++++-
+ 4 files changed, 47 insertions(+), 2 deletions(-)
+
+diff --git a/Source/Windows/ARM64EC/Module.cpp b/Source/Windows/ARM64EC/Module.cpp
+index c44798dac..642a6ccf4 100644
+--- a/Source/Windows/ARM64EC/Module.cpp
++++ b/Source/Windows/ARM64EC/Module.cpp
+@@ -1644,6 +1644,13 @@ NTSTATUS ThreadInit() {
+ 
+   auto* Thread = CTX->CreateThread();
+ 
++  // The process-wide config enabled hardware TSO on the thread that ran ProcessInit; the JIT emits code without
++  // software TSO for every thread from then on, so each new thread needs the hardware mode as well. Without it, guest
++  // code on this thread would run with the host's weak memory ordering.
++  if (Exception::HandlerConfig && Exception::HandlerConfig->HardwareTSOEnabled() && !FEX::Windows::UnixLib::TryEnableHardwareTSO()) {
++    LogMan::Msg::EFmt("FEX: failed to enable hardware TSO on thread {:x}", GetCurrentThreadId());
++  }
++
+   // Default segment setup.
+   auto Frame = Thread->CurrentFrame;
+   auto NewSegments = new FEXCore::Core::CPUState::gdt_segment[32];
+diff --git a/Source/Windows/Common/TSOHandlerConfig.h b/Source/Windows/Common/TSOHandlerConfig.h
+index f63478d79..1511f86d3 100644
+--- a/Source/Windows/Common/TSOHandlerConfig.h
++++ b/Source/Windows/Common/TSOHandlerConfig.h
+@@ -19,6 +19,7 @@ public:
+ 
+     if (TSOEnabled() && FEX::Windows::UnixLib::TryEnableHardwareTSO()) {
+       CTX.SetHardwareTSOSupport(true);
++      HardwareTSO = true;
+     }
+ 
+     uint64_t Flags = (StrictInProcessSplitLocks() ? FEX_UNALIGN_ATOMIC_STRICT_SPLIT_LOCKS : 0) |
+@@ -33,7 +34,14 @@ public:
+     return UnalignedHandlerType;
+   }
+ 
++  // The JIT then emits plain loads and stores. On macOS the switch (thread_set_x86_64_compat) only covers the calling
++  // thread, so every other thread that runs guest code must turn it on too (see EnableHardwareTSOOnThread).
++  bool HardwareTSOEnabled() const {
++    return HardwareTSO;
++  }
++
+ private:
++  bool HardwareTSO {};
+   FEX_CONFIG_OPT(TSOEnabled, TSOENABLED);
+   FEX_CONFIG_OPT(HalfBarrierTSOEnabled, HALFBARRIERTSOENABLED);
+   FEX_CONFIG_OPT(StrictInProcessSplitLocks, STRICTINPROCESSSPLITLOCKS);
+diff --git a/Source/Windows/UnixLib/CMakeLists.txt b/Source/Windows/UnixLib/CMakeLists.txt
+index 37eda6aa0..d41cbbbd4 100644
+--- a/Source/Windows/UnixLib/CMakeLists.txt
++++ b/Source/Windows/UnixLib/CMakeLists.txt
+@@ -6,7 +6,9 @@ include(GNUInstallDirs)
+ function(CreateLib TargetName LibName)
+   add_library(${TargetName} SHARED FEXUnixLib.cpp)
+   set_target_properties(${TargetName} PROPERTIES OUTPUT_NAME ${LibName} PREFIX "lib" SUFFIX ".so")
+-  target_link_libraries(${TargetName} PRIVATE rt)
++  if (NOT APPLE)
++    target_link_libraries(${TargetName} PRIVATE rt)
++  endif()
+   install(TARGETS ${TargetName} LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT Runtime)
+ endfunction()
+ 
+diff --git a/Source/Windows/UnixLib/FEXUnixLib.cpp b/Source/Windows/UnixLib/FEXUnixLib.cpp
+index 8adef5993..12e9a9767 100644
+--- a/Source/Windows/UnixLib/FEXUnixLib.cpp
++++ b/Source/Windows/UnixLib/FEXUnixLib.cpp
+@@ -4,8 +4,20 @@
+ #include <fcntl.h>
+ #include <string>
+ #include <sys/mman.h>
+-#include <sys/prctl.h>
+ #include <unistd.h>
++#ifdef __APPLE__
++// macOS: the hardware TSO switch is thread_set_x86_64_compat() (public in the macOS 26 SDK, needs the
++// com.apple.developer.cross-architecture-support entitlement that Wine's loader has). The Linux-only controls below
++// (unaligned atomics, huge pages, VMA names, shared-memory stats) report STATUS_NOT_SUPPORTED.
++#include <mach/kern_return.h>
++#include <mach/mach_traps.h>
++// No prctl on macOS; every caller below returns before reaching it.
++static inline int prctl(int, ...) {
++  return -1;
++}
++#else
++#include <sys/prctl.h>
++#endif
+ 
+ #include "FEXUnixLib.h"
+ 
+@@ -47,6 +59,10 @@ constexpr NTSTATUS STATUS_INTERNAL_ERROR = 0xC00000E5;
+ 
+ static NTSTATUS FEXUnixLib_SetHardwareTSOControlHandler(void* _Args) {
+   auto Args = reinterpret_cast<const FEXUnixLib_SetHardwareTSOControlArgs*>(_Args);
++#ifdef __APPLE__
++  // Per thread: the caller enables it on every thread that runs guest code.
++  return thread_set_x86_64_compat(Args->Enable ? 1 : 0) == KERN_SUCCESS ? STATUS_SUCCESS : STATUS_NOT_SUPPORTED;
++#endif
+   if (Args->Enable) {
+     int ret = prctl(PR_GET_MEM_MODEL, 0, 0, 0, 0);
+     if (ret == PR_SET_MEM_MODEL_DEFAULT) {
+@@ -60,16 +76,25 @@ static NTSTATUS FEXUnixLib_SetHardwareTSOControlHandler(void* _Args) {
+ }
+ 
+ static NTSTATUS FEXUnixLib_SetKernelUnalignedAtomicControlHandler(void* _Args) {
++#ifdef __APPLE__
++  return STATUS_NOT_SUPPORTED;
++#endif
+   auto Args = reinterpret_cast<const FEXUnixLib_SetKernelUnalignedAtomicControl*>(_Args);
+   return prctl(PR_ARM64_SET_UNALIGN_ATOMIC, Args->Flags, 0, 0, 0) == 0 ? STATUS_SUCCESS : STATUS_NOT_SUPPORTED;
+ }
+ 
+ static NTSTATUS FEXUnixLib_MadviseHandler(void* _Args) {
++#ifdef __APPLE__
++  return STATUS_NOT_SUPPORTED; // The advice values are Linux's (MADV_HUGEPAGE, MADV_NOHUGEPAGE).
++#endif
+   auto Args = reinterpret_cast<const FEXUnixLib_Madvise*>(_Args);
+   return madvise(const_cast<void*>(Args->Addr), Args->Size, Args->Advise) == 0 ? STATUS_SUCCESS : STATUS_INTERNAL_ERROR;
+ }
+ 
+ static NTSTATUS FEXUnixLib_SetVMANameHandler(void* _Args) {
++#ifdef __APPLE__
++  return STATUS_NOT_SUPPORTED;
++#endif
+   auto Args = reinterpret_cast<const FEXUnixLib_SetVMAName*>(_Args);
+   return prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, reinterpret_cast<unsigned long>(Args->Addr), Args->Size, Args->Name) == 0 ?
+            STATUS_SUCCESS :
+@@ -148,6 +173,9 @@ err:
+ }
+ 
+ static NTSTATUS FEXUnixLib_GetSHMStatsVMAHandler(void* _Args) {
++#ifdef __APPLE__
++  return STATUS_NOT_SUPPORTED; // Growing the mapping relies on Linux shm semantics.
++#endif
+   auto Args = reinterpret_cast<FEXUnixLib_GetSHMStatsVMA*>(_Args);
+   if (Args->SHMBase == nullptr) {
+     Args->SHMBase = InitializeSHM(Args->MapSize, Args->MaxSize);

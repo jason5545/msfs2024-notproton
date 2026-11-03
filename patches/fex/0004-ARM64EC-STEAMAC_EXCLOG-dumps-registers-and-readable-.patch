@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: jason chien <3936511+jason5545@users.noreply.github.com>
 Date: Mon, 2 Nov 2026 20:09:56 +0800
-Subject: [PATCH 4/6] ARM64EC: STEAMAC_EXCLOG dumps registers and readable
+Subject: [PATCH 4/7] ARM64EC: STEAMAC_EXCLOG dumps registers and readable
  strings at the first access violations in the main executable
 
 For MSFS 2024's main thread reading NULL during Xbox sign-in on Wine's ARM64EC: all GPRs, then the readable ASCII and

@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: jason chien <3936511+jason5545@users.noreply.github.com>
 Date: Mon, 2 Nov 2026 19:18:37 +0800
-Subject: [PATCH 2/6] ARM64EC: STEAMAC_EXCLOG=1 logs every exception handed to
+Subject: [PATCH 2/7] ARM64EC: STEAMAC_EXCLOG=1 logs every exception handed to
  the guest, with TEB stack bounds
 
 Diagnostics for MSFS 2024 losing its main thread to a stack overflow during Xbox sign-in on Wine's ARM64EC.

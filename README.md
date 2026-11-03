@@ -60,7 +60,7 @@ DXVK 和 vkd3d-proton 跟遊戲在同一個行程裡。編成 ARM64EC 之後遊�
 - **Hadron `compat_run.sh`**：啟動選項 `HADRON_MAC_BACKGROUND=1`，或一次性請求檔 `~/Library/Application Support/hadron/background/<AppID>`（10 分鐘內有效）。設好之後才跑任何 Wine 程序（prefix 更新的 wineboot 也藏住），`open -g` 啟動、不開 Hadron 的啟動視窗。Steam 開遊戲之前會先跑一次安裝腳本（`iscriptevaluator.exe`，verb `run`），那次也走背景，但請求留給遊戲本身那次（`waitforexitandrun`）拿；11/3 第一次試的時候請求被安裝腳本先用掉，遊戲變成正常模式出現在畫面上（fork `56dcd8b` 修掉）。
 - **輸入**：從 Wine 內部送硬體輸入（一支小的 Windows 程式加入遊戲的 wineserver，透過 win32u 的 `SendHardwareInput` 送，跟 winemac 轉送 Mac 輸入走同一條路），不動 Mac 的游標和前景。MSFS 的按鈕要先 hover，移動兩次再點就按得到；搜尋框打字也收得到。監看程式每 30 ms 檢查遊戲和 Steam 的視窗，有視窗跑到桌面之上就立刻藏起來、搶走前景就還回去。這部分工具只放本機，不在 repo 裡。
 
-11/3 一整輪（開遊戲、登入、主選單、Free Flight、進駕駛艙、退出）遊戲視窗 0 次出現在畫面上、0 次搶前景。還沒解決的：Steam 收到開遊戲的指令時會自己叫出主視窗，現在靠監看程式立刻藏起來，開頭仍會閃一下。
+11/3 一整輪（開遊戲、登入、主選單、Free Flight、進駕駛艙、退出）遊戲視窗 0 次出現在畫面上、0 次搶前景。
 
 ## 修掉的問題
 

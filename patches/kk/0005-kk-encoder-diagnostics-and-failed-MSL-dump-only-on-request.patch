@@ -1,0 +1,78 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: jason chien <3936511+jason5545@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 09:05:00 +0800
+Subject: [PATCH] kk: encoder diagnostics and failed MSL dump only on request
+
+The encoder shape log of fxgl/steamac 0073 was on for every Apple9 or
+newer GPU. On an M5 Max it wrote about 500 lines a second into the Wine
+log of MSFS 2024 (1.24 million of 1.32 million lines in 15 minutes). It
+is now off unless MESA_KK_ENCODER_LOG=1; cbs still logs every call.
+
+The failed-MSL dump of 0003 only runs with MESA_KK_DUMP_FAILED_MSL=1.
+The "Failed to create MTLLibrary" message itself is unchanged.
+
+Applies after 0004.
+---
+diff --git a/src/kosmickrisp/bridge/mtl_compiler.m b/src/kosmickrisp/bridge/mtl_compiler.m
+index 44d8496c8e3..358be6c6710 100644
+--- a/src/kosmickrisp/bridge/mtl_compiler.m
++++ b/src/kosmickrisp/bridge/mtl_compiler.m
+@@ -204,14 +204,17 @@ mtl_new_compiler(mtl_device *device)
+ }
+ 
+ /* Library */
+-/* Keep the MSL of a library Metal refuses, with the error, under
+- * ~/Library/Logs/kk-failed-msl/<hash>.metal (at most 200 files), so a
+- * translation bug can be read back after the run. */
++/* With MESA_KK_DUMP_FAILED_MSL=1, keep the MSL of a library Metal refuses,
++ * with the error, under ~/Library/Logs/kk-failed-msl/<hash>.metal (at most
++ * 200 files), so a translation bug can be read back after the run. */
+ static void
+ mtl_dump_failed_msl(const char *src, const char *err)
+ {
+    static unsigned dumped;
+    const char *home = getenv("HOME");
++   const char *want = getenv("MESA_KK_DUMP_FAILED_MSL");
++   if (!want || !want[0] || !strcmp(want, "0"))
++      return;
+    if (!home || __atomic_fetch_add(&dumped, 1u, __ATOMIC_RELAXED) >= 200u)
+       return;
+    char dir[1024], path[1100];
+diff --git a/src/kosmickrisp/bridge/mtl_encoder.m b/src/kosmickrisp/bridge/mtl_encoder.m
+index 6fbe13b0c08..1148ed2a4e0 100644
+--- a/src/kosmickrisp/bridge/mtl_encoder.m
++++ b/src/kosmickrisp/bridge/mtl_encoder.m
+@@ -7,6 +7,8 @@
+ #include "mtl_encoder.h"
+ #include "util/hash_table.h"
+ 
++#include <stdlib.h>
++#include <string.h>
+ #include <inttypes.h>
+ #include <pthread.h>
+ #include <stdio.h>
+@@ -33,13 +35,24 @@ mtl_encoder_set_log(bool enabled)
+    encoder_log_all = enabled;
+ }
+ 
++/* Off unless asked for: on an Apple9 GPU this wrote ~500 lines a second into
++ * the Wine log of MSFS 2024 (94% of it). MESA_KK_ENCODER_LOG=1 turns the
++ * shape log back on for Apple9 and newer GPUs, cbs (mtl_encoder_set_log) logs
++ * every call on any GPU. */
+ static bool
+ encoder_diagnostics_enabled(id<MTLDevice> device)
+ {
+    static _Thread_local id<MTLDevice> last_device;
+    static _Thread_local bool enabled;
++   static int requested = -1;
+    if (encoder_log_all)
+       return true;
++   if (requested < 0) {
++      const char *env = getenv("MESA_KK_ENCODER_LOG");
++      requested = env && env[0] && strcmp(env, "0") != 0;
++   }
++   if (!requested)
++      return false;
+    if (device != last_device) {
+       last_device = device;
+       enabled = [device supportsFamily:MTLGPUFamilyApple9];

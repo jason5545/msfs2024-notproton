@@ -101,7 +101,7 @@ stage() {
 		"$steamac/moltenvk/probe/probe.c" -L"$loader" -lvulkan -Wl,-rpath,"$loader" -o "$work/probe"
 	VK_DRIVER_FILES=$stage/kosmickrisp_icd.json "$work/probe" > "$stage/probe.txt" 2>&1 || { cat "$stage/probe.txt"; exit 1; }
 	{
-		echo "KosmicKrisp for NotProton (msfs2024-notproton tools/kk-build/build-kk.sh)"
+		echo "KosmicKrisp for Hadron and NotProton (squark tools/kk-build/build-kk.sh)"
 		echo "mesa:     $MESA_COMMIT + fxgl/steamac v1.9.7 host/kosmickrisp/patches (rev $(cat "$steamac"/kosmickrisp/patches/*.patch | shasum -a 256 | cut -c1-8))"
 		echo "extra:    $(git -C "$src" status --porcelain | wc -l | tr -d ' ') changed paths vs MESA_COMMIT"
 		echo "driver:   $(sed -n 's/^driver: *//p' "$stage/probe.txt")"

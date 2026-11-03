@@ -1,115 +1,129 @@
-# MSFS 2024 在 Apple Silicon Mac 上：NotProton 路線
+# Squark：MSFS 2024 在 Apple Silicon Mac 上（Hadron 路線）
 
 **正體中文** | [English](README.en.md)
 
-讓 Microsoft Flight Simulator 2024（Steam 版）在 Apple Silicon Mac 上跑起來的修正與工具。用的是 [NotProton](https://github.com/NotProtonNot/NotProton)（macOS 原生 Steam 的 Steam Play，底下是 CrossOver 27 Preview 的 arm64 Wine 加 FEX ARM64EC）。
+讓 Microsoft Flight Simulator 2024（Steam 版）在 Apple Silicon Mac 上跑起來的修正與工具。底座是自己 fork 的 [Hadron](https://github.com/nheisterkamp/Hadron)（[NotProton](https://github.com/NotProtonNot/NotProton) 的 fork，macOS 原生 Steam 的 Steam Play，自己從原始碼編 arm64 Wine runtime），arm64 引擎換成 [Highball](https://github.com/gauthierpiarrette/highball-engine) 為 MSFS 調過的那套，再加上我們自己的 D3D12 圖形層（vkd3d-proton＋DXVK 編成 ARM64EC，跑在 KosmicKrisp 上）。
 
-做法是把幾個開放原始碼元件從原始碼自己編，編進自己的 NotProton，由它寫進 runner（CrossOver 的原檔留備份）。遊戲檔案不動。
+全部從開放原始碼編，遊戲檔案不動。
+
+名字是 squawk（應答機代碼）加 quark（夸克，組成 hadron 的粒子）；squark 也是超對稱理論裡夸克的夥伴粒子。這個 repo 11/3 從 `msfs2024-notproton` 改名；11/3 中午之前走的是 NotProton（CrossOver 27 Preview 的 Wine）路線，那段的 patch 和工具留在這裡當紀錄。
 
 ## 現況（2026/11/3）
 
-- 從開機一路走完：開場影片、載入、按 Start 後 Xbox 自動登入（不用每次重新登入）、進到世界地圖（自由飛行選單）。
-- 按「開始飛行」後載入完成，進到機場：駕駛艙畫面正常，停在跑道上，約 16 FPS（11/3）。
-- 還沒實際起飛。
+- NotProton 路線（到 11/3 中午）：從開機走到 Xbox 自動登入、世界地圖，按「開始飛行」進到機場，駕駛艙畫面正常，停在跑道上約 16 FPS。還沒起飛。
+- 換到 Hadron 之後：runtime 編好、整套回歸測試過了（Hadron 自己的 `check-runtime.sh` 8 項、Highball 的 x64 忠實度測試數字跟它的 README 一致、我們的除錯暫存器／例外／SMC／TSO／憑證／DPAPI 測試、D3D12 與 D3D11↔D3D12 共用貼圖在 KosmicKrisp 上逐像素一致），Steam 也接上了。**還沒用 Hadron 開過遊戲。**
 
 ## 環境
 
 | 項目 | 版本 |
 |---|---|
 | Mac | M5 Max（40 核 GPU）、128 GB、macOS 27.2 |
-| NotProton | 自己編的 NotProton 1.2.3（上游 `4df944f` 加 `patches/notproton/`），runner `crossover-27.0.0.41073-fex`（CrossOver Preview 20261015，Wine `wine-11.17-8910-g4683e69e153`，FEX `FEX-2604-1037-gf0b5147`） |
+| Hadron | fork [`jason5545/Hadron`](https://github.com/jason5545/Hadron) 分支 `steamac`（上游 `87c4265` 加我們的改動），Hadron 1.0.3，Sparkle 自動更新關掉 |
+| Wine runtime | `wine-11.18-fex`：WineHQ 11.18，加 Hadron 的 patch 0001–0003、0005，Highball `patches-arm64` 0018–0052（highball-engine `2eedc50`），我們的 0004、0053–0056 |
+| FEX | FEX-2610 加 Highball `fex/patches` 0001–0033，unix 端是 Highball 的 `fexunixlib_darwin.cpp`（每條執行緒都開硬體 TSO） |
+| 圖形 | KosmicKrisp（Mesa `ce576c29ed` 加 fxgl/steamac v1.9.7 的 0001–0077，再加 [`patches/kk/`](patches/kk/)）；vkd3d-proton `21a49c97`（v3.0b）、DXVK `3cb664e1`（v2.6.2-23）加 [`patches/vkd3d-proton/`](patches/vkd3d-proton/)、[`patches/dxvk/`](patches/dxvk/)，編成 ARM64EC |
+| 其他 | GStreamer 1.28.7（官方 framework，用 Highball 的腳本精簡；沒有它開始畫面會一直黑） |
 | MSFS 2024 | Steam AppID 2537590，1.9.21.0 |
 
-## 疊進 runner 的元件
+Wine runtime 的 patch、編法和 Hadron 本身的改動都在 fork 裡（`runtime/patches/wine-11.18-fex/`、`runtime/fex/highball/`、`runtime/gstreamer/`、`runtime/build-wine.sh`、`dylib/feats/compat_run.sh`）。Highball 的檔案原樣搬過去、不改原檔，要修就加新編號的 patch。這個 repo 的 `tools/hadron/build-runtime.sh` 呼叫 fork 的 `build-wine.sh`，把 KosmicKrisp 和 ARM64EC 的 vkd3d-proton、DXVK 一起帶進 runtime。
 
-這些元件直接編進自己的 NotProton（fork `jason5545/NotProton-steamac`，分支 `steamac`，改動在 [`patches/notproton/`](patches/notproton/)），不用 variant 或外掛。`tools/np-build/build-notproton.sh install` 把各元件的編譯結果收進 NotProton 的 app payload、編好、簽章、換掉 `/Applications/NotProton.app`；在 NotProton 按更新時，它把元件寫進 FEX runner 並驗證，換掉的原檔留成 `.notproton-orig`。只套用到 CrossOver Preview 20261015（runner `27.0.0.41073-fex`）。
+Wine 的 loader 是 runtime 裡的 `Wine.app`，要有 Cross-architecture Compatibility Framework 權限才能在 arm64 上跑 x86 程式碼：Apple Developer 網站上建一個勾了這項的 App ID，`xcodebuild -allowProvisioningUpdates` 就會產生描述檔（Xcode 不會替這項權限自己註冊 App ID）。
 
-| 寫進 runner | 換掉什麼 | 來源 |
-|---|---|---|
-| `lib/wine/aarch64-windows/xtajit64.dll` | FEX ARM64EC（CrossOver 的 `libarm64ecfex.so` 拿掉） | 上游 FEX `02e24ca5c` 加 `patches/fex/` 六個 patch（x86 執行斷點、例外紀錄、RF 修正、SMC 熱頁） |
-| `lib/wine/aarch64-windows/advapi32.dll` | Wine 的 advapi32 | 上游 Wine 11.17 加 `patches/wine/advapi32-steamac.patch`，`tools/wine-advapi32/` |
-| `lib/wine/aarch64-windows/msvproc.dll` | Wine 的 msvproc | 上游 Wine 11.17 加 `patches/wine/msvproc-arm64ec-yuv2rgb.patch`，`tools/wine-msvproc/` |
-| `lib/aarch64/libMoltenVK.dylib` | Vulkan loader 1.4.363；CrossOver 的 MoltenVK 移到 `lib/aarch64/moltenvk/` 當它的 ICD | Homebrew `vulkan-loader` |
-| `lib/steamac/kk/` | KosmicKrisp | Mesa `ce576c29` 加 fxgl/steamac v1.9.7 的 KosmicKrisp patch，再加 `patches/kk/`（ROV 等，見問題 5），`tools/kk-build/` |
-| `lib/steamac/d3d/` | DXVK、vkd3d-proton（ARM64EC） | DXVK `3cb664e1`（v2.6.2-23）、vkd3d-proton `21a49c97`（v3.0b）加 `patches/dxvk/`、`patches/vkd3d-proton/`（D3D11↔D3D12 透過宿主記憶體共用貼圖），`tools/d3d-build/`（`ARCH=arm64ec`） |
+## 我們的 Wine patch（fork 的 `runtime/patches/wine-11.18-fex/`）
 
-前四項所有 FEX 遊戲都用；沒選 D3D 層的遊戲，Vulkan 照舊走 MoltenVK（裝置端功能跟原本一樣）。D3D 層是每款遊戲自己選：相容性頁面「圖形」多一個「vkd3d-proton + KosmicKrisp」，選了之後每次啟動把五個 DLL 放進 prefix 的 `system32`、加 DLL override、Vulkan 指到 KosmicKrisp，並設 `VKD3D_FEATURE_LEVEL=12_1`、`VKD3D_SHADER_MODEL=6_7`。MSFS 的 Steam 啟動選項：
+| patch | 內容 |
+|---|---|
+| 0004 | aarch64 loader 的連結參數（PAGEZERO、image base、x86_64 版面）和從 `Wine.app` 找 `ntdll.so`。Hadron 原本的 0004 其餘部分 Highball 都有，而且更完整 |
+| 0053 | Highball 0030 的 `dlopen_host_lib` 加轉型，讓 `wine/unixlib.h` 也能當 C++ 編（lsteamclient 的 unix 端） |
+| 0054 | `HADRON_WINE_USER` 指定 Windows 使用者名稱。Wine 的 DPAPI 把使用者名稱混進金鑰，CrossOver 時代以 `crossover` 加密的資料（Xbox 登入）要同一個名字才解得開；NotProton 留下的 prefix 由 `compat_run.sh` 自動設 |
+| 0055 | `HADRON_VK_HOST_SHARING=1` 不給程式 `VK_KHR_external_memory_win32`。Highball 0036 透過 Metal 物件提供它，我們的 DXVK／vkd3d-proton 看到它就不走驗證過的宿主記憶體共用，D3D11↔D3D12 共用貼圖會失敗；選我們的圖形層時自動設 |
+| 0056 | `HADRON_MAC_BACKGROUND=1` 背景模式，給自動化測試用：視窗放在桌面圖層底下（畫面上看不到，但照常畫、截得到）、永遠不搶前景、不動主機游標和解析度、不經 macOS 輸入法，輸入只從 Wine 內部送 |
+
+## 圖形與啟動選項
+
+遊戲的 Hadron 面板「圖形」選「vkd3d-proton + KosmicKrisp」（`HADRON_GRAPHICS=vkd3d`）：覆蓋層 `lib/graphics/vkd3d`＋`lib/graphics/dxvk` 排在 Wine 自己的 DLL 前面，Vulkan 走 KosmicKrisp，並設 `VKD3D_FEATURE_LEVEL=12_1`、`VKD3D_SHADER_MODEL=6_7`、`DXVK_CONFIG`。只有 arm64（FEX）runtime 有這個選項。MSFS 現在的 Steam 啟動選項還是 NotProton 時期的寫法，`compat_run.sh` 會對應成 Hadron 的名稱：
 
 ```
 CX_GRAPHICS_BACKEND=vkd3d NOTPROTON_ENV_JSC_useJIT=false %command%
 ```
 
-DXVK 和 vkd3d-proton 跟遊戲在同一個行程裡。編成 ARM64EC 之後遊戲照樣當 x64 DLL 載入，裡面的程式碼直接跑原生 ARM64，D3D 轉 Vulkan 這一步不用再跟遊戲一起在 FEX 裡模擬。離線測試（`tools/d3d-bench/`）正確性都過，D3D12 錄每次 draw 的時間少約 7–16%，第一次建 PSO 快很多（8 條執行緒同時建 96 個：x64 0.6–1 秒、ARM64EC 0.03 秒）；代價是遊戲每次呼叫都要跨一次 x64／ARM64EC 的邊界，D3D11 這種一次只做一點事的呼叫反而慢（約 50 → 190 ns）。**ARM64EC 這組還沒在遊戲裡驗。**
+`CX_GRAPHICS_BACKEND` 對應 `HADRON_GRAPHICS`，`NOTPROTON_ENV_<名稱>` 對應 `HADRON_ENV_<名稱>`（已經有 Hadron 名稱的優先）。MSFS（2537590）在 arm64 runtime 上自動帶 Highball 的 MSFS SMC 設定（`HB_FEX_SMC_RETIRE=1 HB_FEX_SMC_SKIP_SAME=1 HB_FEX_SMC_HOT_MAXINST=64 HB_FEX_VM_FASTPATH=1 HB_FEX_SMC_DEFER_CALLRET=1`），啟動選項有設的優先。
+
+DXVK 和 vkd3d-proton 跟遊戲在同一個行程裡。編成 ARM64EC 之後遊戲照樣當 x64 DLL 載入，裡面的程式碼直接跑原生 ARM64，D3D 轉 Vulkan 這一步不用再跟遊戲一起在 FEX 裡模擬。離線測試（`tools/d3d-bench/`）：D3D12 錄每次 draw 的時間少約 7–16%，第一次建 PSO 快很多（8 條執行緒同時建 96 個：x64 0.6–1 秒、ARM64EC 0.03 秒）；代價是每次呼叫都要跨一次 x64／ARM64EC 的邊界，D3D11 這種一次只做一點事的呼叫反而慢（約 50 → 190 ns）。**ARM64EC 這組還沒在遊戲裡驗。**
 
 ## 修掉的問題
+
+下面 1–5 是 NotProton 路線上查到、修好的。換到 Hadron 後，每一項怎麼處理寫在各段最後。
 
 ### 1. Xbox 每次重開都要重新登入
 
 - XAL 只用 `CredEnumerateW(filter*)` 讀存好的憑證，包括 DeviceKey。
 - Wine 的 `CredEnumerateW` 會把登錄檔裡的憑證，跟 mountmgr 從宿主鑰匙圈查到的合在一起。macOS 版的 `search_credentials` 找不到符合項目時回 `STATUS_NOT_FOUND`，到 advapi32 變成 `ERROR_NOT_FOUND`（1168）；advapi32 只把 `ERROR_NOT_SUPPORTED` 當成「宿主沒有」，所以整個列舉失敗。Linux 回的是 `NOT_SUPPORTED`，不會出事。
 - 結果 XAL 每次都以為沒有裝置金鑰，重新產生一把，登入也就跟著要重來。
-- 修法：`ERROR_NOT_FOUND` 也當成宿主沒有憑證。另外照 CrossOver 原本的行為補上 `GetUserNameA/W` 回 `crossover`（CrossOver Hack 12735；設 `CX_REPORT_REAL_USERNAME` 就回真名）。
-- 驗證：DeviceKey 的雜湊重開後不變，權杖靜默更新，沒有再跳登入畫面。`tools/cred-test/` 在 runner 裡測 CredWrite／Read／Enumerate、沒有符合項目的情況、BCrypt ECDSA。
+- 修法：`ERROR_NOT_FOUND` 也當成宿主沒有憑證（`patches/wine/advapi32-steamac.patch`）。
+- **Hadron 路線**：Highball 的 Wine 0034 是同一個修法。另外 Wine 的 DPAPI 把使用者名稱混進金鑰，CrossOver 底下是 `crossover`、Hadron 是 `steamuser`，名字一換，舊的登入資料就解不開（`tools/cred-test/dpapitest.c` 實測），所以加了 0054，NotProton 留下的 prefix 照舊用 `crossover`。
 
 ### 2. 載入畫面背景整片直條紋、偏黃藍
 
 - Wine 的 `msvproc.dll` 內建 FFmpeg，它的 ARM64EC `yuv2rgb_neon.S` 在 NV12→BGRA 時有暫存器衝突：每 16 個像素，前 8 個的藍色被後 8 個的紅色蓋掉。
 - CrossOver 27 原本那顆，跟上游 Wine 11.17 原樣自己編出來的，輸出一模一樣，所以這是上游原始碼的問題。
 - 修正後離線比對，藍色誤差從 67.75 降到 0.58；遊戲裡直條紋消失，同一塊天空的條紋強度從 37.48 降到 0.27。`tools/share-test/` 的 `mfgrab` 用來離線重現。
+- **Hadron 路線**：Highball 的 Wine 0037 修的是同一個檔案、同一個錯。
 
 ### 3. 登入時卡在「Authentication in progress (8/22)」
 
-- 遊戲每格都用 x86 硬體除錯暫存器設執行斷點，FEX ARM64EC 原本不支援，要自己補。
+- 遊戲每格都用 x86 硬體除錯暫存器設執行斷點，FEX ARM64EC 原本不支援。
 - 補上之後還有一個問題：例外處理（VEH）改了 RIP 之後，FEX 沒清掉 RF 記號，下一次命中同一組斷點時被吞掉，接著存取違規。
 - 修正在 `patches/fex/` 的 0001（執行斷點）和 0005（RF）。`tools/dr-test/`、`tools/eh-test/` 是對應的測試程式。
+- **Hadron 路線**：Highball 的 FEX 0017 和 Wine 0029。它照真的 Windows 的語意做：handler 拿到的 context 沒有 RF，不改 context 就繼續的話，同一個斷點會一直觸發，直到 handler 自己關掉（Highball 在 Windows Server 上驗過）。我們的 `dr-test`、`eh-test` 是照 Linux 上 Wine 的行為寫的期待，在這套 FEX 上斷點那段會逾時，測試期待還沒改。
 
 ### 4. 載入時「四槽斷點」那段很慢
 
 - 載入中有一段會反覆命中四個斷點約 700 輪，每輪都牽涉自我修改程式碼（SMC）。ARM64EC 的 FEX 每次 SMC 都要走一次頁故障，一輪約 0.8 秒，整段要 9 分鐘左右。
 - 把在 Linux 版 FEX 做過的「熱頁」（同一頁故障太多次就改成逐指令檢查）搬到 ARM64EC 之後，698 輪 85.8 秒跑完（`patches/fex/` 的 0006）。`tools/smc-test/` 量單次 SMC 的成本。
+- 同一段在 NotProton 上還少了硬體 TSO（`patches/fex/` 的 0007），`tools/tso-bench/` 量得到差別。
+- **Hadron 路線**：Highball 的 FEX 有自己的 SMC 對策（0020、0023 等），MSFS 自動帶它的 MSFS 設定，比全關快 2–5 倍、全部正確（`tools/smc-msfs/`）；硬體 TSO 每條執行緒都開。資料和程式碼在同一頁、一直寫的情況，它仍比我們舊的熱頁慢（每輪約 2 萬 ns 對 17 ns）；Highball 的 `HB_FEX_SMC_INLINE=1` 快得多，但跨執行緒逐步改碼的測試會卡住，沒有開。
 
 ### 5. 按「開始飛行」後卡死
 
 - MSFS 用 D3D12 的 ROV（rasterizer ordered views）。遊戲要 Feature Level 12_1，所以 `VKD3D_FEATURE_LEVEL=12_1` 讓 vkd3d-proton 回報支援，照樣產生 fragment shader interlock 的 SPIR-V。KosmicKrisp 不認得 `begin/end_invocation_interlock`，印成 `Unknown intrinsic`，Metal 編不過；`vkEndCommandBuffer` 回 `VK_ERROR_INVALID_SHADER_NV`，vkd3d-proton 照樣送出，接著在 `vkQueueSubmit2` 崩潰。主選單時就有 270 個這種 shader，按開始飛行才真的畫到。Mesa 上游的 KosmicKrisp 也還沒有。
 - Metal 對應的功能是 raster order group，但實測（M5 Max，N 個重疊片段各做一次讀出、加一、寫回）只有「從帶 `raster_order_group` 屬性的參數推出來」的存取才有順序保證；KosmicKrisp 從普通位址轉型拿到的貼圖 handle 不算。
-- 修法（`patches/kk/` 的 0001）：用到 interlock 的 fragment shader 多帶幾個有屬性的參數，可寫貼圖和 device 記憶體的存取位址都從這些參數推出來，並宣告 `VK_EXT_fragment_shader_interlock`。0002 讓編不過的 pipeline 只丟掉那次繪圖、不讓整個 command buffer 失敗，0003 把 Metal 拒絕的 MSL 存下來，0004 拿掉 KosmicKrisp 沒有對應的 `PrimitiveShadingRateKHR` 輸出（主選單另外 12 個 vertex shader）。
+- 修法（`patches/kk/` 的 0001）：用到 interlock 的 fragment shader 多帶幾個有屬性的參數，可寫貼圖和 device 記憶體的存取位址都從這些參數推出來，並宣告 `VK_EXT_fragment_shader_interlock`。0002 讓編不過的 pipeline 只丟掉那次繪圖、不讓整個 command buffer 失敗，0003 把 Metal 拒絕的 MSL 存下來，0004 拿掉 KosmicKrisp 沒有對應的 `PrimitiveShadingRateKHR` 輸出（主選單另外 12 個 vertex shader），0005 讓除錯輸出預設關閉。
 - 驗證：原生 Vulkan 測試 N=1024 時有 interlock 每個像素剛好 1024，沒有的對照組會掉數。遊戲裡 `Unknown intrinsic` 從 270 次變 0 次，按開始飛行後進到機場，駕駛艙畫面正常。
+- **Hadron 路線**：同一份 KosmicKrisp 帶進 runtime（`lib/libvulkan_kosmickrisp.dylib`）。
 
-## FEX 的修改
+## NotProton 路線（11/3 中午之前，停用）
 
-`patches/fex/` 是 FEX 的六個 patch，依序套在上游 main `02e24ca5c`，結果等於 fork 分支 `steamac-darwin` 的 `c33b6a5e9`（`git apply` 驗過，檔案樹相同）。
+這幾樣只在 NotProton 路線用，留著當紀錄：
 
-- 0001：x86 執行斷點。CrossOver 27 Preview 的 ntdll 是閉源的，它把 x64 context 轉成 ARM64 時會丟掉除錯暫存器，所以這個 patch 在執行期 detour ntdll 的 ARM64EC `NtSetContextThread`／`NtGetContextThread`，DR0–DR7 改存在 FEX 的執行緒狀態。這是在「不碰閉源二進位」原則定下之前做的，保留沿用，之後不再擴大這種做法。
-- 0002–0004：`STEAMAC_EXCLOG=1` 時記錄交給遊戲的例外，只用來除錯。
-- 0005：例外處理改了 RIP 之後清掉 RF 記號。
-- 0006：SMC 熱頁。
-
-這些 patch 是 AI 協助寫的。FEX 上游的 `CONTRIBUTING.md` 寫明不收 AI 產生的程式碼，所以只放在這裡，不送上游。編法見 `patches/README.md`。
+- [`patches/notproton/`](patches/notproton/)、`tools/np-build/`：把元件編進自己的 NotProton（fork `jason5545/NotProton-steamac` 分支 `steamac`），由它寫進 CrossOver 的 FEX runner。
+- [`patches/fex/`](patches/fex/)：FEX 的七個 patch（執行斷點、例外紀錄、RF、SMC 熱頁、硬體 TSO），依序套在上游 main `02e24ca5c`，等於 fork 分支 `steamac-darwin`。0001 在執行期 detour CrossOver 閉源 ntdll 的 ARM64EC `NtSetContextThread`／`NtGetContextThread`，是在「不碰閉源二進位」原則定下之前做的，之後不再用這種做法。這些 patch 是 AI 協助寫的，FEX 上游的 `CONTRIBUTING.md` 寫明不收 AI 產生的程式碼，所以只放在這裡，不送上游。
+- [`patches/wine/`](patches/wine/)、`tools/wine-advapi32/`、`tools/wine-msvproc/`：從上游 Wine 11.17 編 advapi32、msvproc，換掉 CrossOver 的。
+- `tools/fex-unixlib/`：NotProton 的 FEX 用的 macOS unixlib（硬體 TSO）。
 
 ## 工具
 
 | 路徑 | 用途 |
 |---|---|
-| `tools/wine-advapi32/` | 從上游 Wine 11.17 原始碼編 ARM64X `advapi32.dll` |
-| `tools/wine-msvproc/` | 編 ARM64X `msvproc.dll` |
-| `tools/kk-build/` | 照 fxgl/steamac v1.9.7 的方式給 NotProton 編 KosmicKrisp |
-| `tools/np-build/` | 把元件收進自己的 NotProton、編、簽章、安裝 |
+| `tools/hadron/` | `build-runtime.sh` 用 fork 編 runtime；`run.sh` 在 runtime 上、一次性 prefix 裡跑一支 Windows 測試程式；`suite.sh` 跑整套回歸（我們的測試加 Highball 的 x64 忠實度測試） |
+| `tools/kk-build/` | 照 fxgl/steamac v1.9.7 的方式編 KosmicKrisp |
 | `tools/d3d-build/` | 編 DXVK／vkd3d-proton（x64 或 ARM64EC） |
-| `tools/d3d-bench/` | D3D11／D3D12 轉 Vulkan 的 CPU 成本（x64 與 ARM64EC 版比較），`ectest/` 是 ARM64EC DLL 的 C++ 例外與回呼測試 |
-| `tools/cred-test/` | Credential Manager 與 BCrypt 測試 |
+| `tools/d3d-bench/` | D3D11／D3D12 轉 Vulkan 的 CPU 成本（x64 與 ARM64EC 比較），`ectest/` 是 ARM64EC DLL 的 C++ 例外與回呼測試 |
+| `tools/cred-test/` | Credential Manager、BCrypt、DPAPI（`dpapitest.c`）測試 |
 | `tools/dr-test/` | `SetThreadContext` 除錯暫存器測試 |
 | `tools/eh-test/` | ARM64EC 例外處理與斷點恢復測試 |
-| `tools/smc-test/` | 自我修改程式碼的成本與正確性（含跨執行緒寫入、改保護） |
+| `tools/smc-test/`、`tools/smc-msfs/` | 自我修改程式碼的成本與正確性；`smc-msfs` 模擬 MSFS 那幾種寫法 |
+| `tools/tso-bench/` | x86 記憶體順序（軟體與硬體 TSO）的正確性與成本 |
 | `tools/share-test/` | D3D11↔D3D12 共用貼圖、Media Foundation 影片解碼與 `msvproc` 輸出 |
 | `tools/np-gfx/` | Vulkan 與 D3D12 基本測試 |
 
-Wine 的 DLL 用 llvm-mingw（含 arm64ec）編，Wine configure 加 `--enable-archs=arm64ec,aarch64`，bison 要用 Homebrew 的新版。
+Wine 的 DLL 和測試程式用 llvm-mingw（含 arm64ec）編。
 
 ## 原則
 
 - 只補環境，不改、不打補丁、不反組譯遊戲檔案。
-- 閉源的部分（CrossOver Preview 的 Wine 與 FEX、D3DMetal、Metal 驅動、Steam、遊戲）只看公開介面和行為，不反組譯。要知道某個元件怎麼做，讀對應的開放原始碼。
+- 閉源的部分（D3DMetal、Metal 驅動、Rosetta、Steam、遊戲，以及 NotProton 時期的 CrossOver Preview）只看公開介面和行為，不反組譯。要知道某個元件怎麼做，讀對應的開放原始碼。
 
 ## 授權
 
-`patches/` 底下的 patch 沿用各自上游的授權：Wine 是 LGPL 2.1 以上，DXVK 是 zlib，vkd3d-proton 是 LGPL 2.1。
+`patches/` 底下的 patch 沿用各自上游的授權：Wine 是 LGPL 2.1 以上，DXVK 是 zlib，vkd3d-proton 是 LGPL 2.1，Mesa（KosmicKrisp）是 MIT，FEX 是 MIT。

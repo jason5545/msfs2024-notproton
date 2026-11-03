@@ -1,5 +1,7 @@
 # patches
 
+`kk/`、`dxvk/`、`vkd3d-proton/` 是 Hadron 路線照舊在用的（KosmicKrisp 和 ARM64EC 的 D3D 層，`tools/hadron/build-runtime.sh` 帶進 runtime）。`wine/`、`fex/`、`notproton/` 是 NotProton 路線（11/3 中午之前）用的，停用、留著當紀錄：Hadron 路線的 Wine 和 FEX patch 在 fork `jason5545/Hadron` 的 `runtime/`。
+
 | 檔案 | 套在哪 | 內容 |
 |---|---|---|
 | `wine/advapi32-steamac.patch` | 上游 Wine 11.17（`36b6a2c`） | `CredEnumerateW` 把宿主回的 `ERROR_NOT_FOUND` 也當成沒有宿主憑證；`GetUserNameA/W` 照 CrossOver Hack 12735 回 `crossover` |

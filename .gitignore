@@ -18,3 +18,7 @@ tools/*/out/
 
 # 控制前景、截圖的測試腳本只放本機
 /tools/video/
+
+# padprobe 在 Mac 上編出來的執行檔
+tools/padprobe/macpad
+tools/padprobe/sdlpad

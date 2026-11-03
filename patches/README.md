@@ -8,6 +8,8 @@
 | `dxvk/0002-…` | 接在 0001 後面 | 讓 libc++（llvm-mingw，編 ARM64EC 用）編得過：`unordered_map::emplace` 的空 key tuple 改成直接傳預設 key。缺的 `<algorithm>`、`<new>`、`<exception>` 由 `tools/d3d-build/cross-arm64ec.txt` 強制 include，不改子模組 |
 | `vkd3d-proton/0001-…` | vkd3d-proton `21a49c97`（v3.0b） | 同上，D3D12 那一側 |
 
+| `notproton/0001-…` | NotProton `4df944f`（上游 main，11/3） | 把 payload 的 `steamac/`（`tools/np-build/build-notproton.sh` 收進去）寫進 FEX runner 並驗證（`SteamacOverlay.swift`）；圖形後端多一個「vkd3d-proton + KosmicKrisp」（`CX_GRAPHICS_BACKEND=vkd3d`）；其他 FEX 遊戲的 Vulkan 經 loader 照舊走 MoltenVK；元件換了就讓 prefix 重跑 wine.inf；關掉 Sparkle 自動更新。等於 fork `jason5545/NotProton-steamac` 分支 `steamac` 的 `227fd2f` |
+
 編法見 `tools/wine-advapi32/build.sh`、`tools/wine-msvproc/`、`tools/d3d-build/build-d3d.sh`（`ARCH=arm64ec` 編 ARM64EC）。
 
 ## kk/

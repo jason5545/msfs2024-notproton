@@ -1,0 +1,691 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: jason chien <3936511+jason5545@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 10:25:17 +0800
+Subject: [PATCH] steamac: lay this fork's runner components over the FEX
+ runner, add a vkd3d backend
+
+The payload's optional steamac/ folder (staged by msfs2024-notproton's
+tools/np-build/build-notproton.sh) is laid over the runner build it names
+when the runner is patched, and verified with the rest of the patch:
+our FEX (xtajit64.dll), advapi32, msvproc, CrossOver's libarm64ecfex.so
+taken out, and the Vulkan loader in libMoltenVK.dylib's place with
+CrossOver's MoltenVK kept in lib/aarch64/moltenvk as an ICD. Replaced
+files are kept as .notproton-orig. The run script reruns wine.inf once
+when the overlay changes so prefixes follow.
+
+A new Graphics backend for FEX tools, vkd3d-proton + KosmicKrisp
+(CX_GRAPHICS_BACKEND=vkd3d), copies the DXVK/vkd3d-proton DLLs from the
+runner's lib/steamac/d3d into system32, adds their overrides and points
+Vulkan at KosmicKrisp; every other FEX game keeps MoltenVK through the
+loader. The updater is off so an official release cannot replace this
+build.
+---
+ Makefile                                      |   4 +
+ .../NotProtonApp/Model/RunnerPatcher.swift    |   5 +-
+ .../NotProtonApp/Model/SteamacOverlay.swift   | 166 ++++++++++++++++++
+ .../NotProtonApp/Support/AppUpdater.swift     |  13 +-
+ .../SteamacOverlayTests.swift                 | 110 ++++++++++++
+ dylib/feats/compat_run.sh                     |  77 ++++++++
+ dylib/feats/defaults.c                        |   7 +-
+ dylib/feats/webpatch.c                        |   5 +-
+ dylib/tests/defaults-check.c                  |   3 +
+ dylib/tests/panel-behavior/fex.js             |   2 +
+ dylib/tests/steamaccheck.sh                   |  87 +++++++++
+ 11 files changed, 466 insertions(+), 13 deletions(-)
+ create mode 100644 app/Sources/NotProtonApp/Model/SteamacOverlay.swift
+ create mode 100644 app/Tests/NotProtonAppTests/SteamacOverlayTests.swift
+ create mode 100644 dylib/tests/steamaccheck.sh
+
+diff --git a/Makefile b/Makefile
+index e997e98..7f0f292 100644
+--- a/Makefile
++++ b/Makefile
+@@ -105,6 +105,10 @@ runcheck:
+ 	shellcheck dylib/feats/compat_run.sh && sh -n dylib/feats/compat_run.sh && \
+ 	echo "==> runcheck: the run script lints and parses clean"
+ 
++.PHONY: steamaccheck
++steamaccheck:
++	@sh dylib/tests/steamaccheck.sh dylib/feats/compat_run.sh
++
+ .PHONY: seedcheck
+ seedcheck:
+ 	@if [ ! -f dylib/tests/seedcheck.sh ]; then $(call SKIP,seedcheck,dylib/tests/seedcheck.sh); exit 0; fi; \
+diff --git a/app/Sources/NotProtonApp/Model/RunnerPatcher.swift b/app/Sources/NotProtonApp/Model/RunnerPatcher.swift
+index ebfba03..caf603c 100644
+--- a/app/Sources/NotProtonApp/Model/RunnerPatcher.swift
++++ b/app/Sources/NotProtonApp/Model/RunnerPatcher.swift
+@@ -33,8 +33,9 @@ enum RunnerPatcher {
+         var ntdll: [WineArch] = []
+         var builtins: [String] = []
+         var loaders: [String] = []
++        var steamac: [String] = []
+ 
+-        var wroteNothing: Bool { ntdll.isEmpty && builtins.isEmpty && loaders.isEmpty }
++        var wroteNothing: Bool { ntdll.isEmpty && builtins.isEmpty && loaders.isEmpty && steamac.isEmpty }
+     }
+ 
+     static func install(
+@@ -44,6 +45,7 @@ enum RunnerPatcher {
+         outcome.ntdll = try installNtdll(build: build, root: root, bridge: bridge)
+         outcome.builtins = try installBuiltins(root: root, bridge: bridge)
+         outcome.loaders = try grantLoaderEntitlement(root: root)
++        outcome.steamac = try SteamacOverlay.install(build: build, root: root)
+         return outcome
+     }
+ 
+@@ -88,6 +90,7 @@ enum RunnerPatcher {
+             }
+         }
+ 
++        wrong += SteamacOverlay.verify(build: build, root: root)
+         return wrong
+     }
+ 
+diff --git a/app/Sources/NotProtonApp/Model/SteamacOverlay.swift b/app/Sources/NotProtonApp/Model/SteamacOverlay.swift
+new file mode 100644
+index 0000000..6557335
+--- /dev/null
++++ b/app/Sources/NotProtonApp/Model/SteamacOverlay.swift
+@@ -0,0 +1,166 @@
++// steamac (msfs2024-notproton): our own builds laid over the FEX runner. The payload's
++// steamac/ folder is optional; a build without it behaves exactly like upstream.
++//
++//   steamac/build    the runner build these files were made for (one line, e.g. 27.0.0.41073-fex).
++//                    Every other build is left alone: the DLLs replace Wine's own and only fit that Wine.
++//   steamac/runner/  a tree laid over the runner's CrossOver folder. Files it replaces are kept
++//                    as <name>.notproton-orig first, like the ntdll patch does.
++//   steamac/remove   runner files to take out, one relative path per line (kept as .notproton-orig).
++//
++// lib/aarch64/libMoltenVK.dylib is special: the overlay puts the Vulkan loader there, since
++// win32u dlopens that name and FEX's wine ignores DYLD_INSERT_LIBRARIES. CrossOver's own
++// MoltenVK moves to lib/aarch64/moltenvk/ with an ICD file, and the run script points
++// VK_DRIVER_FILES at it unless a game picks the vkd3d backend (KosmicKrisp), so games that
++// used MoltenVK keep it.
++//
++// .notproton-steamac in the CrossOver folder holds a digest of everything laid down; the run
++// script compares it with the prefix's record and has wine.inf rerun when it changes, so a
++// prefix's system32 copies follow the runner.
++
++import Foundation
++
++enum SteamacOverlay {
++    static let step = String(localized: "Lay the steamac components over the runner")
++    static let stampName = ".notproton-steamac"
++    static let moltenVKRelocated = "lib/aarch64/moltenvk"
++    static let loaderSlot = "lib/aarch64/libMoltenVK.dylib"
++
++    struct Content: Sendable {
++        let build: String
++        let files: [(rel: String, source: URL)]
++        let removals: [String]
++        let digest: String
++    }
++
++    static func content(payload: URL? = nil) throws -> Content? {
++        let base: URL
++        if let payload {
++            base = payload
++        } else {
++            guard let root = try? InstallPayload.root() else { return nil }
++            base = root
++        }
++        let folder = base.appending(path: "steamac")
++        let fm = FileManager.default
++        guard fm.fileExists(atPath: folder.appending(path: "build").path(percentEncoded: false)) else { return nil }
++
++        let build = try String(contentsOf: folder.appending(path: "build"), encoding: .utf8)
++            .trimmingCharacters(in: .whitespacesAndNewlines)
++        let tree = folder.appending(path: "runner")
++        var files: [(rel: String, source: URL)] = []
++        if let walker = fm.enumerator(at: tree, includingPropertiesForKeys: [.isRegularFileKey]) {
++            for case let url as URL in walker {
++                guard (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true,
++                      url.lastPathComponent != ".DS_Store" else { continue }
++                let rel = String(url.standardizedFileURL.path(percentEncoded: false)
++                    .dropFirst(tree.standardizedFileURL.path(percentEncoded: false).count))
++                    .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
++                files.append((rel: rel, source: url))
++            }
++        }
++        files.sort { $0.rel < $1.rel }
++
++        var removals: [String] = []
++        let removeList = folder.appending(path: "remove")
++        if let text = try? String(contentsOf: removeList, encoding: .utf8) {
++            removals = text.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
++                .filter { !$0.isEmpty && !$0.hasPrefix("#") }
++        }
++        for rel in files.map(\.rel) + removals where rel.hasPrefix("/") || rel.contains("..") {
++            throw StepFailure(step: step, detail: String(localized: "steamac names \(rel), which is outside the runner."))
++        }
++
++        var lines = ["build \(build)"]
++        for file in files { lines.append("file \(file.rel) \(try Digest.sha256(of: file.source))") }
++        for rel in removals { lines.append("remove \(rel)") }
++        let digest = Digest.sha256(of: Data(lines.joined(separator: "\n").utf8))
++        return Content(build: build, files: files, removals: removals, digest: digest)
++    }
++
++    static func applies(to build: RunnerBuild, _ content: Content) -> Bool {
++        build.id == content.build
++    }
++
++    // Returns what it wrote, relative to the CrossOver folder.
++    static func install(build: RunnerBuild, root: URL, payload: URL? = nil) throws -> [String] {
++        guard let content = try content(payload: payload), applies(to: build, content) else { return [] }
++        let fm = FileManager.default
++        var written: [String] = []
++
++        // CrossOver's MoltenVK first, before the loader takes its name.
++        let relocated = root.appending(path: "\(moltenVKRelocated)/libMoltenVK.dylib")
++        if content.files.contains(where: { $0.rel == loaderSlot }),
++           !fm.fileExists(atPath: relocated.path(percentEncoded: false)) {
++            let shipped = Clean.copy(of: root.appending(path: loaderSlot))
++            guard fm.fileExists(atPath: shipped.path(percentEncoded: false)) else {
++                throw StepFailure(step: step, detail: String(localized: "The runner has no \(loaderSlot) to keep."))
++            }
++            try atomicReplace(relocated, from: shipped, step: step)
++            // Not marked as a portability driver: the loader would then hide it from winevulkan,
++            // which never asks for portability enumeration (vkCreateInstance fails with no driver).
++            let icd = """
++            {
++                "file_format_version": "1.0.0",
++                "ICD": {
++                    "library_path": "./libMoltenVK.dylib",
++                    "api_version": "1.3.0"
++                }
++            }
++
++            """
++            try atomicReplace(root.appending(path: "\(moltenVKRelocated)/MoltenVK_icd.json"),
++                              with: Data(icd.utf8), step: step)
++            written.append("\(moltenVKRelocated)/libMoltenVK.dylib")
++        }
++
++        for file in content.files {
++            let destination = root.appending(path: file.rel)
++            if try Digest.sha256(of: file.source) == Digest.sha256IfPresent(destination) { continue }
++            if fm.fileExists(atPath: destination.path(percentEncoded: false)) {
++                try RunnerPatcher.keepClean(destination)
++            }
++            try atomicReplace(destination, from: file.source, step: step)
++            written.append(file.rel)
++        }
++
++        for rel in content.removals {
++            let target = root.appending(path: rel)
++            guard fm.fileExists(atPath: target.path(percentEncoded: false)) else { continue }
++            try RunnerPatcher.keepClean(target)
++            try fm.removeItem(at: target)
++            written.append("-\(rel)")
++        }
++
++        let stamp = root.appending(path: stampName)
++        if (try? String(contentsOf: stamp, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
++            != content.digest {
++            try atomicReplace(stamp, with: Data("\(content.digest)\n".utf8), step: step)
++        }
++        return written
++    }
++
++    static func verify(build: RunnerBuild, root: URL, payload: URL? = nil) -> [String] {
++        guard let content = try? content(payload: payload), applies(to: build, content) else { return [] }
++        let fm = FileManager.default
++        var wrong: [String] = []
++        for file in content.files {
++            let live = Digest.sha256IfPresent(root.appending(path: file.rel))
++            if live == nil {
++                wrong.append(String(localized: "steamac: \(file.rel) is missing"))
++            } else if live != (try? Digest.sha256(of: file.source)) {
++                wrong.append(String(localized: "steamac: \(file.rel) is out of date"))
++            }
++        }
++        for rel in content.removals where fm.fileExists(atPath: root.appending(path: rel).path(percentEncoded: false)) {
++            wrong.append(String(localized: "steamac: \(rel) should not be there"))
++        }
++        if content.files.contains(where: { $0.rel == loaderSlot }),
++           !fm.fileExists(atPath: root.appending(path: "\(moltenVKRelocated)/MoltenVK_icd.json").path(percentEncoded: false)) {
++            wrong.append(String(localized: "steamac: CrossOver's MoltenVK has not been kept"))
++        }
++        let stamp = (try? String(contentsOf: root.appending(path: stampName), encoding: .utf8))?
++            .trimmingCharacters(in: .whitespacesAndNewlines)
++        if stamp != content.digest { wrong.append(String(localized: "steamac: the runner's record is out of date")) }
++        return wrong
++    }
++}
+diff --git a/app/Sources/NotProtonApp/Support/AppUpdater.swift b/app/Sources/NotProtonApp/Support/AppUpdater.swift
+index 0f1e87e..490761f 100644
+--- a/app/Sources/NotProtonApp/Support/AppUpdater.swift
++++ b/app/Sources/NotProtonApp/Support/AppUpdater.swift
+@@ -5,12 +5,11 @@ final class AppUpdater {
+ 
+     private let controller: SPUStandardUpdaterController
+ 
++    // steamac: this build carries its own runner components (SteamacOverlay), so an official
++    // release must not replace it. The updater never starts and never checks; updates come
++    // from merging upstream into the fork and rebuilding.
+     init() {
+-        #if DEBUG
+         let scheduling = false
+-        #else
+-        let scheduling = true
+-        #endif
+         controller = SPUStandardUpdaterController(
+             startingUpdater: scheduling,
+             updaterDelegate: nil,
+@@ -18,9 +17,5 @@ final class AppUpdater {
+         )
+     }
+ 
+-    func check() {
+-        #if !DEBUG
+-        controller.checkForUpdates(nil)
+-        #endif
+-    }
++    func check() {}
+ }
+diff --git a/app/Tests/NotProtonAppTests/SteamacOverlayTests.swift b/app/Tests/NotProtonAppTests/SteamacOverlayTests.swift
+new file mode 100644
+index 0000000..d66385d
+--- /dev/null
++++ b/app/Tests/NotProtonAppTests/SteamacOverlayTests.swift
+@@ -0,0 +1,110 @@
++import Foundation
++import Testing
++
++@testable import NotProtonApp
++
++@Suite("steamac runner overlay")
++struct SteamacOverlayTests {
++
++    private static let build = RunnerBuild(
++        bundleVersion: "27.0.0.41073", releaseVersion: "20261015", flavor: "fex",
++        loaderSHA256: "", cleanNtdll: [:], patchedNtdll: [:])
++
++    private struct Fixture {
++        let base: URL
++        var payload: URL { base.appending(path: "payload") }
++        var root: URL { base.appending(path: "CrossOver") }
++
++        func write(_ text: String, _ rel: String, under top: URL) throws {
++            let url = top.appending(path: rel)
++            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
++            try Data(text.utf8).write(to: url)
++        }
++        func read(_ rel: String) -> String? {
++            (try? Data(contentsOf: root.appending(path: rel))).map { String(decoding: $0, as: UTF8.self) }
++        }
++        func exists(_ rel: String) -> Bool {
++            FileManager.default.fileExists(atPath: root.appending(path: rel).path(percentEncoded: false))
++        }
++    }
++
++    private static func fixture(build: String = "27.0.0.41073-fex") throws -> Fixture {
++        let f = Fixture(base: URL(filePath: NSTemporaryDirectory()).appending(path: "steamac-\(UUID().uuidString)"))
++        let sc = f.payload.appending(path: "steamac")
++        try f.write(build + "\n", "build", under: sc)
++        try f.write("lib/wine/aarch64-unix/libarm64ecfex.so\n", "remove", under: sc)
++        try f.write("our fex", "runner/lib/wine/aarch64-windows/xtajit64.dll", under: sc)
++        try f.write("vulkan loader", "runner/lib/aarch64/libMoltenVK.dylib", under: sc)
++        try f.write("kk", "runner/lib/steamac/kk/libvulkan_kosmickrisp.dylib", under: sc)
++        try f.write("cw fex", "lib/wine/aarch64-windows/xtajit64.dll", under: f.root)
++        try f.write("cw unixlib", "lib/wine/aarch64-unix/libarm64ecfex.so", under: f.root)
++        try f.write("moltenvk", "lib/aarch64/libMoltenVK.dylib", under: f.root)
++        return f
++    }
++
++    @Test("Lays the tree over the runner, keeps what it replaces and moves MoltenVK aside")
++    func installs() throws {
++        let f = try Self.fixture()
++        defer { try? FileManager.default.removeItem(at: f.base) }
++
++        #expect(!SteamacOverlay.verify(build: Self.build, root: f.root, payload: f.payload).isEmpty)
++        let written = try SteamacOverlay.install(build: Self.build, root: f.root, payload: f.payload)
++        #expect(written.contains("lib/wine/aarch64-windows/xtajit64.dll"))
++        #expect(f.read("lib/wine/aarch64-windows/xtajit64.dll") == "our fex")
++        #expect(f.read("lib/wine/aarch64-windows/xtajit64.dll.notproton-orig") == "cw fex")
++        #expect(f.read("lib/aarch64/libMoltenVK.dylib") == "vulkan loader")
++        #expect(f.read("lib/aarch64/moltenvk/libMoltenVK.dylib") == "moltenvk")
++        #expect(f.read("lib/aarch64/moltenvk/MoltenVK_icd.json")?.contains("./libMoltenVK.dylib") == true)
++        #expect(f.read("lib/steamac/kk/libvulkan_kosmickrisp.dylib") == "kk")
++        #expect(!f.exists("lib/wine/aarch64-unix/libarm64ecfex.so"))
++        #expect(f.read("lib/wine/aarch64-unix/libarm64ecfex.so.notproton-orig") == "cw unixlib")
++        #expect(f.exists(SteamacOverlay.stampName))
++        #expect(SteamacOverlay.verify(build: Self.build, root: f.root, payload: f.payload).isEmpty)
++    }
++
++    @Test("A second install writes nothing and keeps CrossOver's MoltenVK, not the loader")
++    func idempotent() throws {
++        let f = try Self.fixture()
++        defer { try? FileManager.default.removeItem(at: f.base) }
++        _ = try SteamacOverlay.install(build: Self.build, root: f.root, payload: f.payload)
++        #expect(try SteamacOverlay.install(build: Self.build, root: f.root, payload: f.payload).isEmpty)
++        #expect(f.read("lib/aarch64/moltenvk/libMoltenVK.dylib") == "moltenvk")
++        #expect(f.read("lib/wine/aarch64-windows/xtajit64.dll.notproton-orig") == "cw fex")
++    }
++
++    @Test("A changed component is reported, then replaced, and the record moves on")
++    func updates() throws {
++        let f = try Self.fixture()
++        defer { try? FileManager.default.removeItem(at: f.base) }
++        _ = try SteamacOverlay.install(build: Self.build, root: f.root, payload: f.payload)
++        let first = f.read(SteamacOverlay.stampName)
++        try f.write("our fex v2", "steamac/runner/lib/wine/aarch64-windows/xtajit64.dll", under: f.payload)
++        #expect(SteamacOverlay.verify(build: Self.build, root: f.root, payload: f.payload)
++            .contains { $0.contains("xtajit64.dll is out of date") })
++        #expect(try SteamacOverlay.install(build: Self.build, root: f.root, payload: f.payload)
++            == ["lib/wine/aarch64-windows/xtajit64.dll"])
++        #expect(f.read("lib/wine/aarch64-windows/xtajit64.dll") == "our fex v2")
++        #expect(f.read("lib/wine/aarch64-windows/xtajit64.dll.notproton-orig") == "cw fex")
++        #expect(f.read(SteamacOverlay.stampName) != first)
++        #expect(SteamacOverlay.verify(build: Self.build, root: f.root, payload: f.payload).isEmpty)
++    }
++
++    @Test("Another runner build is left alone")
++    func otherBuild() throws {
++        let f = try Self.fixture(build: "27.0.0.41069-fex")
++        defer { try? FileManager.default.removeItem(at: f.base) }
++        #expect(try SteamacOverlay.install(build: Self.build, root: f.root, payload: f.payload).isEmpty)
++        #expect(SteamacOverlay.verify(build: Self.build, root: f.root, payload: f.payload).isEmpty)
++        #expect(f.read("lib/wine/aarch64-windows/xtajit64.dll") == "cw fex")
++        #expect(!f.exists(SteamacOverlay.stampName))
++    }
++
++    @Test("A payload without steamac does nothing")
++    func noPayload() throws {
++        let f = try Self.fixture()
++        defer { try? FileManager.default.removeItem(at: f.base) }
++        try FileManager.default.removeItem(at: f.payload.appending(path: "steamac"))
++        #expect(try SteamacOverlay.install(build: Self.build, root: f.root, payload: f.payload).isEmpty)
++        #expect(SteamacOverlay.verify(build: Self.build, root: f.root, payload: f.payload).isEmpty)
++    }
++}
+diff --git a/dylib/feats/compat_run.sh b/dylib/feats/compat_run.sh
+index a5a76c5..14de21b 100755
+--- a/dylib/feats/compat_run.sh
++++ b/dylib/feats/compat_run.sh
+@@ -1019,6 +1019,8 @@ if [ "$verb" = waitforexitandrun ] && [ -f "$np_defaults_file" ] && [ -r "$np_de
+     value=${line#*=}
+     case "$line" in
+       CX_GRAPHICS_BACKEND=dxmt | CX_GRAPHICS_BACKEND=dxvk | CX_GRAPHICS_BACKEND=wined3d) ;;
++      CX_GRAPHICS_BACKEND=vkd3d)
++        [ "${wine_unix##*/}" = aarch64-unix ] || continue ;;
+       CX_GRAPHICS_BACKEND=d3dmetal | D3DM_ENABLE_METALFX=[01] | ROSETTA_ADVERTISE_AVX=[01])
+         [ "${wine_unix##*/}" != aarch64-unix ] || continue ;;
+       FEX_X87REDUCEDPRECISION=[01])
+@@ -1077,6 +1079,19 @@ if [ "$verb" = waitforexitandrun ] && [ -f "$np_defaults_file" ] && [ -r "$np_de
+ fi
+ [ "${CX_GRAPHICS_BACKEND-}" != auto ] || unset -v CX_GRAPHICS_BACKEND
+ 
++# steamac: "vkd3d" is not a CrossOver backend. It picks the DXVK/vkd3d-proton DLLs and
++# KosmicKrisp this fork lays into the FEX runner (lib/steamac, see SteamacOverlay.swift);
++# CrossOver itself stays on its automatic choice, which the native DLLs override.
++np_steamac_d3d=0
++if [ "${CX_GRAPHICS_BACKEND-}" = vkd3d ]; then
++  unset -v CX_GRAPHICS_BACKEND
++  if [ "${wine_unix##*/}" = aarch64-unix ]; then
++    np_steamac_d3d=1
++  else
++    echo "steamac: the vkd3d backend needs the FEX runner, ignored on x86_64 Wine" >> "$log" 2>&1 || true
++  fi
++fi
++
+ np_dropped=""
+ if [ "${wine_unix##*/}" = aarch64-unix ]; then
+   if [ "${CX_GRAPHICS_BACKEND:-}" = d3dmetal ]; then
+@@ -1492,6 +1507,23 @@ note_variant_switch() {
+   fi
+ }
+ 
++# steamac: SteamacOverlay.swift writes a digest of what it laid into the runner. Wine only
++# refreshes a prefix's system32 copies when wine.inf reruns, so a new digest reruns it once.
++note_steamac_overlay() {
++  record="$STEAM_COMPAT_DATA_PATH/notproton-steamac"
++  had=$(cat "$record" 2>/dev/null || true)
++  now=$(cat "$CX_ROOT/.notproton-steamac" 2>/dev/null || true)
++  if [ "$had" != "$now" ] && [ -f "$WINEPREFIX/system.reg" ]; then
++    printf '0\n' > "$WINEPREFIX/.update-timestamp" 2>/dev/null || true
++    echo "=== steamac runner files changed (${had:-none} to ${now:-none}), wine.inf reruns ===" >> "$log" 2>&1 || true
++  fi
++  if [ -n "$now" ]; then
++    printf '%s\n' "$now" > "$record" 2>/dev/null || true
++  else
++    rm -f "$record"
++  fi
++}
++
+ claim_prefix() {
+   [ -r "$STEAM_COMPAT_DATA_PATH/notproton-build" ] \
+     || echo "=== prefix claimed by build $np_build ===" >> "$log" 2>&1 || true
+@@ -2396,6 +2428,7 @@ if [ -n "$STEAM_COMPAT_DATA_PATH" ]; then
+   refuse_foreign_prefix
+   claim_prefix
+   note_variant_switch
++  note_steamac_overlay
+   stage_step="prefix switch check"
+   offer_switch_rebuild
+   echo "sync: WINEMSYNC=$WINEMSYNC from $msync_from" >> "$log" 2>&1 || true
+@@ -3118,6 +3151,50 @@ done <<NP_FEAT_LIST
+ $np_feat_list
+ NP_FEAT_LIST
+ 
++# steamac: the runner's Vulkan loader needs a driver. Games on the vkd3d backend get
++# KosmicKrisp and the DXVK/vkd3d-proton DLLs in system32; every other game keeps CrossOver's
++# MoltenVK. A variable the launch options or a plugin already set is left alone.
++np_sc_env() {
++  eval "[ -z \"\${NOTPROTON_ENV_${1%%=*}+x}\" ]" || return 0
++  case "
++$np_feat_envs" in (*"
++${1%%=*}="*) return 0 ;; esac
++  np_feat_envs="$1
++$np_feat_envs"
++  echo "steamac: sets $1" >> "$log" 2>&1 || true
++}
++np_sc_lib="$CX_ROOT/lib/steamac"
++if [ "${wine_unix##*/}" = aarch64-unix ] && [ "$np_steamac_d3d" = 1 ]; then
++  np_sc_sys32="$WINEPREFIX/drive_c/windows/system32"
++  if [ ! -d "$np_sc_lib/d3d" ]; then
++    echo "steamac: the vkd3d backend is selected but this runner has no lib/steamac/d3d" >> "$log" 2>&1 || true
++  elif [ ! -d "$np_sc_sys32" ]; then
++    echo "steamac: the prefix has no system32 yet, the D3D DLLs are not copied" >> "$log" 2>&1 || true
++  else
++    for np_sc_src in "$np_sc_lib/d3d"/*.dll; do
++      [ -f "$np_sc_src" ] || continue
++      np_sc_dst="$np_sc_sys32/${np_sc_src##*/}"
++      cmp -s "$np_sc_src" "$np_sc_dst" && continue
++      rm -f "$np_sc_dst.np-stage.$$"
++      if { cp -c "$np_sc_src" "$np_sc_dst.np-stage.$$" 2>/dev/null \
++           || cp "$np_sc_src" "$np_sc_dst.np-stage.$$"; } && mv -f "$np_sc_dst.np-stage.$$" "$np_sc_dst"; then
++        echo "steamac: copied ${np_sc_src##*/} into system32" >> "$log" 2>&1 || true
++      else
++        rm -f "$np_sc_dst.np-stage.$$"
++        echo "steamac: failed to copy ${np_sc_src##*/} into system32" >> "$log" 2>&1 || true
++      fi
++    done
++    export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:+$WINEDLLOVERRIDES;}d3d12,d3d12core,dxgi,d3d11,d3d10core=n,b"
++    echo "steamac: vkd3d backend, overrides d3d12,d3d12core,dxgi,d3d11,d3d10core=n,b" >> "$log" 2>&1 || true
++  fi
++  np_sc_env "VK_DRIVER_FILES=$np_sc_lib/kk/kosmickrisp_icd.json"
++  np_sc_env "VKD3D_FEATURE_LEVEL=12_1"
++  np_sc_env "VKD3D_SHADER_MODEL=6_7"
++  np_sc_env "DXVK_CONFIG=dxgi.maxDeviceMemory = 16384; dxgi.maxSharedMemory = 8192"
++elif [ "${wine_unix##*/}" = aarch64-unix ] && [ -f "$CX_ROOT/lib/aarch64/moltenvk/MoltenVK_icd.json" ]; then
++  np_sc_env "VK_DRIVER_FILES=$CX_ROOT/lib/aarch64/moltenvk/MoltenVK_icd.json"
++fi
++
+ game_cwd="$(pwd)"
+ if [ -n "$STEAM_DYLD_INSERT_LIBRARIES" ]; then
+   echo "=== overlay injected from $STEAM_DYLD_INSERT_LIBRARIES ===" >> "$log" 2>&1 || true
+diff --git a/dylib/feats/defaults.c b/dylib/feats/defaults.c
+index e1998b0..acf1762 100644
+--- a/dylib/feats/defaults.c
++++ b/dylib/feats/defaults.c
+@@ -20,6 +20,7 @@
+ static const char *const g_bools[]    = { "0", "1", NULL };
+ static const char *const g_backends[] = { "dxmt", "dxvk", "wined3d", NULL };
+ static const char *const g_d3dmetal[] = { "d3dmetal", NULL };
++static const char *const g_vkd3d[]    = { "vkd3d", NULL }; // steamac: DXVK/vkd3d-proton + KosmicKrisp
+ static const char *const g_factors[]  = { "1.5", "1.72", "2.0", "3.0", NULL };
+ static const char *const g_fps[]      = { "30", "40", "60", "120", "144", NULL };
+ 
+@@ -29,8 +30,9 @@ static const struct {
+     const char        *prefix;
+     const char *const *values;
+     const char *const *rosetta_values; // on top of `values`, for Rosetta only
++    const char *const *fex_values;     // on top of `values`, for FEX only
+ } g_settings[] = {
+-    { "CX_GRAPHICS_BACKEND",            ROSETTA | FEX, "", g_backends, g_d3dmetal },
++    { "CX_GRAPHICS_BACKEND",            ROSETTA | FEX, "", g_backends, g_d3dmetal, g_vkd3d },
+     { "MTL_HUD_ENABLED",                ROSETTA | FEX, "", g_bools, NULL },
+     { "D3DM_ENABLE_METALFX",            ROSETTA,       "", g_bools, NULL },
+     { "DXMT_ENABLE_NVEXT",              ROSETTA | FEX, "", g_bools, NULL },
+@@ -92,7 +94,8 @@ static int valid_value(size_t i, uint32_t runner, const char *v, size_t len) {
+     size_t pre = strlen(g_settings[i].prefix);
+     if (len <= pre || memcmp(v, g_settings[i].prefix, pre) != 0) return 0;
+     return is_one_of(g_settings[i].values, v + pre, len - pre)
+-        || (runner == NP_DEFAULTS_ROSETTA && is_one_of(g_settings[i].rosetta_values, v + pre, len - pre));
++        || (runner == NP_DEFAULTS_ROSETTA && is_one_of(g_settings[i].rosetta_values, v + pre, len - pre))
++        || (runner == NP_DEFAULTS_FEX && is_one_of(g_settings[i].fex_values, v + pre, len - pre));
+ }
+ 
+ static int setting_index(uint32_t runner, const char *key, size_t key_len) {
+diff --git a/dylib/feats/webpatch.c b/dylib/feats/webpatch.c
+index a0d004a..993e6c6 100644
+--- a/dylib/feats/webpatch.c
++++ b/dylib/feats/webpatch.c
+@@ -1369,7 +1369,10 @@ static int out_expand(np_out_t *o, const char *replace, const np_cap_t *caps) {
+     "{data:\"d3dmetal\",label:\"D3DMetal\"}," \
+     "{data:\"dxmt\",label:\"DXMT\"}," \
+     "{data:\"dxvk\",label:\"DXVK\"}," \
+-    "{data:\"wined3d\",label:\"WineD3D\"}].filter(x=>!fex||x.data!==\"d3dmetal\")," \
++    "{data:\"wined3d\",label:\"WineD3D\"}," \
++    /* steamac: DXVK/vkd3d-proton + KosmicKrisp, laid into the FEX runner by SteamacOverlay */ \
++    "{data:\"vkd3d\",label:\"vkd3d-proton + KosmicKrisp\"}]" \
++    ".filter(x=>fex?x.data!==\"d3dmetal\":x.data!==\"vkd3d\")," \
+     "pick=f=>\"1\"===f(\"DXMT_METALFX_SPATIAL_SWAPCHAIN\")?(U.find(u=>u.data&&+u.data===pf(f(\"DXMT_CONFIG\")||\"\"))" \
+     "||{data:String(pf(f(\"DXMT_CONFIG\")||\"\"))}).data:\"\"," \
+     "pickFps=f=>pfp(f(\"DXMT_CONFIG\")||\"\");" \
+diff --git a/dylib/tests/defaults-check.c b/dylib/tests/defaults-check.c
+index 9e4e544..a186d4a 100644
+--- a/dylib/tests/defaults-check.c
++++ b/dylib/tests/defaults-check.c
+@@ -76,6 +76,9 @@ static void valid_cases(void) {
+     check(valid(NP_DEFAULTS_ROSETTA, "CX_GRAPHICS_BACKEND=d3dmetal") &&
+           !valid(NP_DEFAULTS_FEX, "CX_GRAPHICS_BACKEND=d3dmetal"),
+           "only Rosetta takes D3DMetal");
++    check(valid(NP_DEFAULTS_FEX, "CX_GRAPHICS_BACKEND=vkd3d") &&
++          !valid(NP_DEFAULTS_ROSETTA, "CX_GRAPHICS_BACKEND=vkd3d"),
++          "only FEX takes vkd3d (steamac)");
+     check(valid(NP_DEFAULTS_FEX, "CX_GRAPHICS_BACKEND=dxvk") &&
+           !valid(NP_DEFAULTS_ROSETTA, "CX_GRAPHICS_BACKEND=auto") &&
+           !valid(NP_DEFAULTS_ROSETTA, "CX_GRAPHICS_BACKEND=vulkan"),
+diff --git a/dylib/tests/panel-behavior/fex.js b/dylib/tests/panel-behavior/fex.js
+index e095de2..aabae45 100644
+--- a/dylib/tests/panel-behavior/fex.js
++++ b/dylib/tests/panel-behavior/fex.js
+@@ -26,6 +26,8 @@ for (const form of Object.keys(FORMS)) {
+     let r = nodes('');
+     t.ok(backends(r).includes('d3dmetal') === !fex,
+          `D3DMetal is ${fex ? 'not ' : ''}offered (${backends(r)})`);
++    t.ok(backends(r).includes('vkd3d') === fex,
++         `vkd3d-proton + KosmicKrisp is ${fex ? '' : 'not '}offered (${backends(r)})`);
+     t.ok(toggles(r).includes(AVX) === !fex, `the AVX2 row is ${fex ? 'hidden' : 'shown'}`);
+     t.ok(toggles(r).includes(X87) === fex, `the x87 row is ${fex ? 'shown' : 'hidden'}`);
+     t.ok(r.some(x => x.type === 'Section' && x.props.label === 'FEX') === fex,
+diff --git a/dylib/tests/steamaccheck.sh b/dylib/tests/steamaccheck.sh
+new file mode 100644
+index 0000000..b481029
+--- /dev/null
++++ b/dylib/tests/steamaccheck.sh
+@@ -0,0 +1,87 @@
++#!/bin/sh
++# steamac: checks the run script's parts for the components SteamacOverlay lays into the FEX runner,
++# against a fake runner and prefix: the vkd3d backend copies the D3D DLLs, adds the overrides and
++# points Vulkan at KosmicKrisp; every other FEX game keeps CrossOver's MoltenVK through the loader;
++# x86_64 Wine and runners without the overlay are left alone; a new overlay reruns wine.inf once.
++set -u
++SRC=${1:-dylib/feats/compat_run.sh}
++T=$(mktemp -d "${TMPDIR:-/tmp}/steamaccheck.XXXXXX")
++trap 'rm -rf "$T"' EXIT
++fails=0
++is() { if [ "$2" = "$3" ]; then echo "  ok    $1"; else echo "  FAIL  $1"; echo "         want [$2]"; echo "         got  [$3]"; fails=$((fails + 1)); fi; }
++
++backend=$(sed -n '/^np_steamac_d3d=0$/,/^np_dropped=""$/p' "$SRC")
++layer=$(sed -n '/^# steamac: the runner.s Vulkan loader needs a driver/,/^game_cwd=/p' "$SRC" | sed '$d')
++overlay=$(sed -n '/^note_steamac_overlay() {$/,/^}$/p' "$SRC")
++[ -n "$backend" ] && [ -n "$layer" ] && [ -n "$overlay" ] || { echo "==> steamaccheck: could not find the steamac parts of $SRC"; exit 1; }
++
++mkrunner() { # mkrunner <dir> <with overlay 0|1>
++  mkdir -p "$1/lib/aarch64/moltenvk" "$1/lib/steamac/d3d" "$1/lib/steamac/kk"
++  if [ "$2" = 1 ]; then
++    echo '{}' > "$1/lib/aarch64/moltenvk/MoltenVK_icd.json"
++    for d in dxgi d3d11 d3d10core d3d12 d3d12core; do echo "$d new" > "$1/lib/steamac/d3d/$d.dll"; done
++    echo '{}' > "$1/lib/steamac/kk/kosmickrisp_icd.json"
++    echo digest-1 > "$1/.notproton-steamac"
++  else
++    rm -rf "$1/lib/aarch64/moltenvk" "$1/lib/steamac"
++  fi
++}
++# run <wine_unix> <launch env...>: the backend part, then the layer; prints the env lines it set and the overrides
++run() {
++  wu=$1; shift
++  env -i HOME="$HOME" PATH="$PATH" CX_ROOT="$CX" WINEPREFIX="$PFX" log="$T/log" wine_unix="$wu" "$@" sh -c "
++    $backend
++    np_feat_envs=\"\${PLUGIN_ENV-}\"
++    $layer
++    printf 'env:%s\n' \"\$(printf '%s\n' \"\$np_feat_envs\" | sed '/^\$/d' | sort | tr '\n' '|')\"
++    printf 'ovr:%s\n' \"\${WINEDLLOVERRIDES-}\"
++    printf 'cx:%s\n' \"\${CX_GRAPHICS_BACKEND-unset}\""
++}
++
++CX=$T/runner/CrossOver; PFX=$T/pfx
++mkrunner "$CX" 1
++mkdir -p "$PFX/drive_c/windows/system32"; echo "old" > "$PFX/drive_c/windows/system32/d3d12.dll"
++
++echo "== vkd3d backend on the FEX runner =="
++out=$(run /x/aarch64-unix CX_GRAPHICS_BACKEND=vkd3d)
++is "CrossOver gets no backend of ours" "cx:unset" "$(echo "$out" | grep '^cx:')"
++is "the overrides are added" "ovr:d3d12,d3d12core,dxgi,d3d11,d3d10core=n,b" "$(echo "$out" | grep '^ovr:')"
++is "Vulkan goes to KosmicKrisp and vkd3d gets its levels" \
++  "env:DXVK_CONFIG=dxgi.maxDeviceMemory = 16384; dxgi.maxSharedMemory = 8192|VKD3D_FEATURE_LEVEL=12_1|VKD3D_SHADER_MODEL=6_7|VK_DRIVER_FILES=$CX/lib/steamac/kk/kosmickrisp_icd.json|" \
++  "$(echo "$out" | grep '^env:')"
++is "the five DLLs are in system32" "5" "$(grep -l new "$PFX"/drive_c/windows/system32/*.dll | wc -l | tr -d ' ')"
++out=$(run /x/aarch64-unix CX_GRAPHICS_BACKEND=vkd3d NOTPROTON_ENV_VKD3D_FEATURE_LEVEL=12_0)
++is "a launch option keeps its own value" "" "$(echo "$out" | grep '^env:' | grep -o 'VKD3D_FEATURE_LEVEL=12_1')"
++out=$(run /x/aarch64-unix CX_GRAPHICS_BACKEND=vkd3d PLUGIN_ENV="VK_DRIVER_FILES=/elsewhere.json")
++is "a plugin's driver wins" "1" "$(echo "$out" | grep '^env:' | grep -o 'VK_DRIVER_FILES=[^|]*' | wc -l | tr -d ' ')"
++
++echo "== other FEX games =="
++out=$(run /x/aarch64-unix CX_GRAPHICS_BACKEND=dxmt)
++is "the backend stays CrossOver's" "cx:dxmt" "$(echo "$out" | grep '^cx:')"
++is "Vulkan stays on CrossOver's MoltenVK" "env:VK_DRIVER_FILES=$CX/lib/aarch64/moltenvk/MoltenVK_icd.json|" "$(echo "$out" | grep '^env:')"
++is "no overrides" "ovr:" "$(echo "$out" | grep '^ovr:')"
++out=$(run /x/aarch64-unix)
++is "automatic also keeps MoltenVK" "env:VK_DRIVER_FILES=$CX/lib/aarch64/moltenvk/MoltenVK_icd.json|" "$(echo "$out" | grep '^env:')"
++
++echo "== x86_64 Wine and plain runners =="
++out=$(run /x/x86_64-unix CX_GRAPHICS_BACKEND=vkd3d)
++is "x86_64 Wine drops vkd3d" "cx:unset" "$(echo "$out" | grep '^cx:')"
++is "and sets nothing" "env:|ovr:" "$(echo "$out" | grep -E '^(env|ovr):' | tr '\n' '|' | sed 's/|$//')"
++mkrunner "$CX" 0
++out=$(run /x/aarch64-unix)
++is "a runner without the overlay sets nothing" "env:" "$(echo "$out" | grep '^env:')"
++
++echo "== the prefix follows the overlay =="
++mkrunner "$CX" 1
++SC=$T/compat; mkdir -p "$SC"; touch "$PFX/system.reg"; echo 1234 > "$PFX/.update-timestamp"
++note() { env -i PATH="$PATH" CX_ROOT="$CX" WINEPREFIX="$PFX" STEAM_COMPAT_DATA_PATH="$SC" log="$T/log" sh -c "$overlay
++note_steamac_overlay"; }
++note
++is "a new overlay reruns wine.inf" "0" "$(cat "$PFX/.update-timestamp")"
++is "and is recorded" "digest-1" "$(cat "$SC/notproton-steamac")"
++echo 1234 > "$PFX/.update-timestamp"; note
++is "the same overlay does not" "1234" "$(cat "$PFX/.update-timestamp")"
++echo digest-2 > "$CX/.notproton-steamac"; note
++is "a changed one does" "0" "$(cat "$PFX/.update-timestamp")"
++
++[ "$fails" = 0 ] && echo "==> steamaccheck: all assertions hold" || { echo "==> steamaccheck: $fails failed"; exit 1; }
+-- 
+2.56.0
+

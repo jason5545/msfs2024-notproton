@@ -4,7 +4,7 @@
 
 讓 Microsoft Flight Simulator 2024（Steam 版）在 Apple Silicon Mac 上跑起來的修正與工具。用的是 [NotProton](https://github.com/NotProtonNot/NotProton)（macOS 原生 Steam 的 Steam Play，底下是 CrossOver 27 Preview 的 arm64 Wine 加 FEX ARM64EC）。
 
-做法是把幾個開放原始碼元件從原始碼自己編，透過 NotProton 的 runner variant 疊進 runner 複本。CrossOver 的原檔不改，遊戲檔案也不動。
+做法是把幾個開放原始碼元件從原始碼自己編，編進自己的 NotProton，由它寫進 runner（CrossOver 的原檔留備份）。遊戲檔案不動。
 
 ## 現況（2026/11/3）
 
@@ -17,27 +17,29 @@
 | 項目 | 版本 |
 |---|---|
 | Mac | M5 Max（40 核 GPU）、128 GB、macOS 27.2 |
-| NotProton | NotProton.app 1.2.1，runner `crossover-27.0.0.41073-fex`（CrossOver Preview 20261015，Wine `wine-11.17-8910-g4683e69e153`，FEX `FEX-2604-1037-gf0b5147`） |
+| NotProton | 自己編的 NotProton 1.2.3（上游 `4df944f` 加 `patches/notproton/`），runner `crossover-27.0.0.41073-fex`（CrossOver Preview 20261015，Wine `wine-11.17-8910-g4683e69e153`，FEX `FEX-2604-1037-gf0b5147`） |
 | MSFS 2024 | Steam AppID 2537590，1.9.21.0 |
 
 ## 疊進 runner 的元件
 
-設定在 [`config/notproton-variants-steamac.conf`](config/notproton-variants-steamac.conf)。Steam 啟動選項：
+這些元件直接編進自己的 NotProton（fork `jason5545/NotProton-steamac`，分支 `steamac`，改動在 [`patches/notproton/`](patches/notproton/)），不用 variant 或外掛。`tools/np-build/build-notproton.sh install` 把各元件的編譯結果收進 NotProton 的 app payload、編好、簽章、換掉 `/Applications/NotProton.app`；在 NotProton 按更新時，它把元件寫進 FEX runner 並驗證，換掉的原檔留成 `.notproton-orig`。只套用到 CrossOver Preview 20261015（runner `27.0.0.41073-fex`）。
 
-```
-NOTPROTON_STEAMAC=1 NOTPROTON_RUNNER_VARIANT=steamacfex+steamackk+steamacadv+steamacvproc NOTPROTON_ENV_JSC_useJIT=false %command%
-```
-
-| variant | 換掉什麼 | 來源 |
+| 寫進 runner | 換掉什麼 | 來源 |
 |---|---|---|
-| `steamacfex` | `xtajit64.dll`（FEX ARM64EC） | 上游 FEX `02e24ca5c` 加 `patches/fex/` 六個 patch（x86 執行斷點、例外紀錄、RF 修正、SMC 熱頁） |
-| `steamackk` | Vulkan loader 1.4.363，接 KosmicKrisp | Mesa `ce576c29` 加 fxgl/steamac v1.9.7 的 KosmicKrisp patch，再加 `patches/kk/` 四個 patch（ROV 等，見問題 5），`tools/kk-build/` |
-| `steamacadv` | `advapi32.dll` | 上游 Wine 11.17 加 `patches/wine/advapi32-steamac.patch`，`tools/wine-advapi32/` |
-| `steamacvproc` | `msvproc.dll` | 上游 Wine 11.17 加 `patches/wine/msvproc-arm64ec-yuv2rgb.patch`，`tools/wine-msvproc/` |
+| `lib/wine/aarch64-windows/xtajit64.dll` | FEX ARM64EC（CrossOver 的 `libarm64ecfex.so` 拿掉） | 上游 FEX `02e24ca5c` 加 `patches/fex/` 六個 patch（x86 執行斷點、例外紀錄、RF 修正、SMC 熱頁） |
+| `lib/wine/aarch64-windows/advapi32.dll` | Wine 的 advapi32 | 上游 Wine 11.17 加 `patches/wine/advapi32-steamac.patch`，`tools/wine-advapi32/` |
+| `lib/wine/aarch64-windows/msvproc.dll` | Wine 的 msvproc | 上游 Wine 11.17 加 `patches/wine/msvproc-arm64ec-yuv2rgb.patch`，`tools/wine-msvproc/` |
+| `lib/aarch64/libMoltenVK.dylib` | Vulkan loader 1.4.363；CrossOver 的 MoltenVK 移到 `lib/aarch64/moltenvk/` 當它的 ICD | Homebrew `vulkan-loader` |
+| `lib/steamac/kk/` | KosmicKrisp | Mesa `ce576c29` 加 fxgl/steamac v1.9.7 的 KosmicKrisp patch，再加 `patches/kk/`（ROV 等，見問題 5），`tools/kk-build/` |
+| `lib/steamac/d3d/` | DXVK、vkd3d-proton（ARM64EC） | DXVK `3cb664e1`（v2.6.2-23）、vkd3d-proton `21a49c97`（v3.0b）加 `patches/dxvk/`、`patches/vkd3d-proton/`（D3D11↔D3D12 透過宿主記憶體共用貼圖），`tools/d3d-build/`（`ARCH=arm64ec`） |
 
-D3D 這層靠 NotProton 的外掛（`NOTPROTON_STEAMAC=1`，設定在 [`config/notproton-plugin-steamac.conf`](config/notproton-plugin-steamac.conf)）：每次啟動把 DXVK 和 vkd3d-proton 的 DLL 放進 prefix 的 `system32`，Vulkan 指到 KosmicKrisp，並設 `VKD3D_FEATURE_LEVEL=12_1`、`VKD3D_SHADER_MODEL=6_7`。目前用的是 DXVK `3cb664e1`（v2.6.2-23）和 vkd3d-proton `21a49c97`（v3.0b）各加一個 patch，讓 D3D11 和 D3D12 之間透過宿主記憶體共用貼圖（`patches/dxvk/`、`patches/vkd3d-proton/`），用 `tools/d3d-build/` 編和換。
+前四項所有 FEX 遊戲都用；沒選 D3D 層的遊戲，Vulkan 照舊走 MoltenVK（裝置端功能跟原本一樣）。D3D 層是每款遊戲自己選：相容性頁面「圖形」多一個「vkd3d-proton + KosmicKrisp」，選了之後每次啟動把五個 DLL 放進 prefix 的 `system32`、加 DLL override、Vulkan 指到 KosmicKrisp，並設 `VKD3D_FEATURE_LEVEL=12_1`、`VKD3D_SHADER_MODEL=6_7`。MSFS 的 Steam 啟動選項：
 
-這些 DLL 跟遊戲在同一個行程裡，平常編成 x86-64，跟遊戲一起跑在 FEX 裡。`tools/d3d-build/` 也能編成 ARM64EC（`ARCH=arm64ec`，llvm-mingw）：遊戲照樣當 x64 DLL 載入，裡面的程式碼直接跑原生 ARM64，D3D 轉 Vulkan 這一步不用再模擬。離線測試（`tools/d3d-bench/`）正確性都過，D3D12 錄每次 draw 的時間少約 7–16%，第一次建 PSO 快很多（8 條執行緒同時建 96 個：x64 0.6–1 秒、ARM64EC 0.03 秒）；代價是遊戲每次呼叫都要跨一次 x64／ARM64EC 的邊界，D3D11 這種一次只做一點事的呼叫反而慢（約 50 → 190 ns）。**還沒在遊戲裡驗**，換法是 `swap-np-d3d.sh ec`。
+```
+CX_GRAPHICS_BACKEND=vkd3d NOTPROTON_ENV_JSC_useJIT=false %command%
+```
+
+DXVK 和 vkd3d-proton 跟遊戲在同一個行程裡。編成 ARM64EC 之後遊戲照樣當 x64 DLL 載入，裡面的程式碼直接跑原生 ARM64，D3D 轉 Vulkan 這一步不用再跟遊戲一起在 FEX 裡模擬。離線測試（`tools/d3d-bench/`）正確性都過，D3D12 錄每次 draw 的時間少約 7–16%，第一次建 PSO 快很多（8 條執行緒同時建 96 個：x64 0.6–1 秒、ARM64EC 0.03 秒）；代價是遊戲每次呼叫都要跨一次 x64／ARM64EC 的邊界，D3D11 這種一次只做一點事的呼叫反而慢（約 50 → 190 ns）。**ARM64EC 這組還沒在遊戲裡驗。**
 
 ## 修掉的問題
 
@@ -89,9 +91,10 @@ D3D 這層靠 NotProton 的外掛（`NOTPROTON_STEAMAC=1`，設定在 [`config/n
 | 路徑 | 用途 |
 |---|---|
 | `tools/wine-advapi32/` | 從上游 Wine 11.17 原始碼編 ARM64X `advapi32.dll` |
-| `tools/wine-msvproc/` | 編 ARM64X `msvproc.dll`，`variant.sh` 比對 sha256 後裝進 NotProton variant |
+| `tools/wine-msvproc/` | 編 ARM64X `msvproc.dll` |
 | `tools/kk-build/` | 照 fxgl/steamac v1.9.7 的方式給 NotProton 編 KosmicKrisp |
-| `tools/d3d-build/` | 編 DXVK／vkd3d-proton（x64 或 ARM64EC），`swap-np-d3d.sh` 備份、換檔、還原 |
+| `tools/np-build/` | 把元件收進自己的 NotProton、編、簽章、安裝 |
+| `tools/d3d-build/` | 編 DXVK／vkd3d-proton（x64 或 ARM64EC） |
 | `tools/d3d-bench/` | D3D11／D3D12 轉 Vulkan 的 CPU 成本（x64 與 ARM64EC 版比較），`ectest/` 是 ARM64EC DLL 的 C++ 例外與回呼測試 |
 | `tools/cred-test/` | Credential Manager 與 BCrypt 測試 |
 | `tools/dr-test/` | `SetThreadContext` 除錯暫存器測試 |

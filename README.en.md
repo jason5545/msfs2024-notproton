@@ -4,7 +4,7 @@
 
 Fixes and tools for running Microsoft Flight Simulator 2024 (Steam version) on Apple Silicon Macs. It runs through [NotProton](https://github.com/NotProtonNot/NotProton), which adds Steam Play to the native macOS Steam client on top of CrossOver 27 Preview's arm64 Wine and FEX ARM64EC.
 
-The approach: build a few open-source components from source and layer them onto a copy of the runner through NotProton's runner variants. CrossOver's own files are left as they are, and the game files are never touched.
+The approach: build a few open-source components from source and build them into our own NotProton, which writes them into the runner (keeping CrossOver's originals as backups). The game files are never touched.
 
 ## Status (2026-11-03)
 
@@ -17,27 +17,29 @@ The approach: build a few open-source components from source and layer them onto
 | Item | Version |
 |---|---|
 | Mac | M5 Max (40-core GPU), 128 GB, macOS 27.2 |
-| NotProton | NotProton.app 1.2.1, runner `crossover-27.0.0.41073-fex` (CrossOver Preview 20261015, Wine `wine-11.17-8910-g4683e69e153`, FEX `FEX-2604-1037-gf0b5147`) |
+| NotProton | our own NotProton 1.2.3 build (upstream `4df944f` plus `patches/notproton/`), runner `crossover-27.0.0.41073-fex` (CrossOver Preview 20261015, Wine `wine-11.17-8910-g4683e69e153`, FEX `FEX-2604-1037-gf0b5147`) |
 | MSFS 2024 | Steam AppID 2537590, 1.9.21.0 |
 
-## Components layered onto the runner
+## Components built into the runner
 
-Configured in [`config/notproton-variants-steamac.conf`](config/notproton-variants-steamac.conf). Steam launch options:
+These components are built into our own NotProton (fork `jason5545/NotProton-steamac`, branch `steamac`; the changes are in [`patches/notproton/`](patches/notproton/)), with no variants or plugins. `tools/np-build/build-notproton.sh install` collects each component's build output into NotProton's app payload, builds and signs the app, and replaces `/Applications/NotProton.app`. When you press update in NotProton, it writes the components into the FEX runner and verifies them; replaced files are kept as `.notproton-orig`. They apply to CrossOver Preview 20261015 (runner `27.0.0.41073-fex`) only.
 
-```
-NOTPROTON_STEAMAC=1 NOTPROTON_RUNNER_VARIANT=steamacfex+steamackk+steamacadv+steamacvproc NOTPROTON_ENV_JSC_useJIT=false %command%
-```
-
-| Variant | Replaces | Source |
+| Written into the runner | Replaces | Source |
 |---|---|---|
-| `steamacfex` | `xtajit64.dll` (FEX ARM64EC) | Upstream FEX `02e24ca5c` plus the six patches in `patches/fex/` (x86 execute breakpoints, exception logging, RF fix, SMC hot pages) |
-| `steamackk` | Vulkan loader 1.4.363, wired to KosmicKrisp | Mesa `ce576c29` plus the fxgl/steamac v1.9.7 KosmicKrisp patches and the four in `patches/kk/` (ROV and more, see problem 5), `tools/kk-build/` |
-| `steamacadv` | `advapi32.dll` | Upstream Wine 11.17 plus `patches/wine/advapi32-steamac.patch`, `tools/wine-advapi32/` |
-| `steamacvproc` | `msvproc.dll` | Upstream Wine 11.17 plus `patches/wine/msvproc-arm64ec-yuv2rgb.patch`, `tools/wine-msvproc/` |
+| `lib/wine/aarch64-windows/xtajit64.dll` | FEX ARM64EC (CrossOver's `libarm64ecfex.so` is removed) | upstream FEX `02e24ca5c` plus the six patches in `patches/fex/` (x86 execute breakpoints, exception logging, RF fix, SMC hot pages) |
+| `lib/wine/aarch64-windows/advapi32.dll` | Wine's advapi32 | upstream Wine 11.17 plus `patches/wine/advapi32-steamac.patch`, `tools/wine-advapi32/` |
+| `lib/wine/aarch64-windows/msvproc.dll` | Wine's msvproc | upstream Wine 11.17 plus `patches/wine/msvproc-arm64ec-yuv2rgb.patch`, `tools/wine-msvproc/` |
+| `lib/aarch64/libMoltenVK.dylib` | the Vulkan loader 1.4.363; CrossOver's MoltenVK moves to `lib/aarch64/moltenvk/` as its ICD | Homebrew `vulkan-loader` |
+| `lib/steamac/kk/` | KosmicKrisp | Mesa `ce576c29` plus fxgl/steamac v1.9.7's KosmicKrisp patches, plus `patches/kk/` (ROV and more, see problem 5), `tools/kk-build/` |
+| `lib/steamac/d3d/` | DXVK, vkd3d-proton (ARM64EC) | DXVK `3cb664e1` (v2.6.2-23) and vkd3d-proton `21a49c97` (v3.0b) plus `patches/dxvk/` and `patches/vkd3d-proton/` (D3D11↔D3D12 texture sharing through host memory), `tools/d3d-build/` (`ARCH=arm64ec`) |
 
-The D3D layer comes from a NotProton plugin (`NOTPROTON_STEAMAC=1`, configured in [`config/notproton-plugin-steamac.conf`](config/notproton-plugin-steamac.conf)). On every launch it copies the DXVK and vkd3d-proton DLLs into the prefix's `system32`, points Vulkan at KosmicKrisp, and sets `VKD3D_FEATURE_LEVEL=12_1` and `VKD3D_SHADER_MODEL=6_7`. The current builds are DXVK `3cb664e1` (v2.6.2-23) and vkd3d-proton `21a49c97` (v3.0b), each with one patch that lets D3D11 and D3D12 share textures through host memory (`patches/dxvk/`, `patches/vkd3d-proton/`). `tools/d3d-build/` builds and swaps them.
+The first four are used by every FEX game; a game that does not pick the D3D layer keeps Vulkan on MoltenVK (the same device features as before). The D3D layer is picked per game: the Compatibility page's Graphics menu has a new "vkd3d-proton + KosmicKrisp" entry. With it, every launch copies the five DLLs into the prefix's `system32`, adds the DLL overrides, points Vulkan at KosmicKrisp, and sets `VKD3D_FEATURE_LEVEL=12_1` and `VKD3D_SHADER_MODEL=6_7`. MSFS's Steam launch options:
 
-These DLLs live in the game's process. Normally they are built for x86-64 and run inside FEX together with the game. `tools/d3d-build/` can also build them as ARM64EC (`ARCH=arm64ec`, llvm-mingw): the game still loads them as x64 DLLs, but their code runs as native ARM64, so the D3D-to-Vulkan translation is no longer emulated. Offline tests (`tools/d3d-bench/`) pass all correctness checks; recording a D3D12 draw takes about 7–16% less time, and first-time PSO creation is much faster (96 PSOs on 8 threads at once: 0.6–1 s for x64, 0.03 s for ARM64EC). The cost is that every call from the game crosses the x64/ARM64EC boundary, so D3D11 calls that do very little each get slower (about 50 → 190 ns). **Not yet tested in the game**; `swap-np-d3d.sh ec` swaps them in.
+```
+CX_GRAPHICS_BACKEND=vkd3d NOTPROTON_ENV_JSC_useJIT=false %command%
+```
+
+DXVK and vkd3d-proton live in the game's process. Built as ARM64EC, the game still loads them as x64 DLLs, but their code runs as native ARM64, so the D3D-to-Vulkan translation is no longer emulated in FEX along with the game. Offline tests (`tools/d3d-bench/`) pass all correctness checks; recording a D3D12 draw takes about 7–16% less time, and first-time PSO creation is much faster (96 PSOs on 8 threads at once: 0.6–1 s for x64, 0.03 s for ARM64EC). The cost is that every call from the game crosses the x64/ARM64EC boundary, so D3D11 calls that do very little each get slower (about 50 → 190 ns). **The ARM64EC set is not yet tested in the game.**
 
 ## Problems fixed
 
@@ -89,9 +91,10 @@ These patches were written with AI assistance. FEX's `CONTRIBUTING.md` says it d
 | Path | Purpose |
 |---|---|
 | `tools/wine-advapi32/` | Builds ARM64X `advapi32.dll` from upstream Wine 11.17 source |
-| `tools/wine-msvproc/` | Builds ARM64X `msvproc.dll`; `variant.sh` checks the sha256 and installs it into the NotProton variant |
+| `tools/wine-msvproc/` | Builds ARM64X `msvproc.dll` |
 | `tools/kk-build/` | Builds KosmicKrisp for NotProton the same way fxgl/steamac v1.9.7 does |
-| `tools/d3d-build/` | Builds DXVK and vkd3d-proton (x64 or ARM64EC); `swap-np-d3d.sh` backs up, swaps, and restores the DLLs |
+| `tools/np-build/` | Collects the components into our NotProton, builds, signs and installs it |
+| `tools/d3d-build/` | Builds DXVK and vkd3d-proton (x64 or ARM64EC) |
 | `tools/d3d-bench/` | CPU cost of the D3D11/D3D12-to-Vulkan translation (x64 vs. ARM64EC builds); `ectest/` checks C++ exceptions and callbacks in an ARM64EC DLL |
 | `tools/cred-test/` | Credential Manager and BCrypt tests |
 | `tools/dr-test/` | `SetThreadContext` debug register test |

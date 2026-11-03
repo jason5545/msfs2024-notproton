@@ -61,6 +61,7 @@ Items 1–5 were found and fixed on the NotProton route. How each is handled on 
 - Wine's `CredEnumerateW` merges the credentials in the registry with those mountmgr finds in the host keychain. When nothing matches, the macOS `search_credentials` returns `STATUS_NOT_FOUND`, which advapi32 sees as `ERROR_NOT_FOUND` (1168); advapi32 only treats `ERROR_NOT_SUPPORTED` as "the host has none", so the whole enumeration fails. Linux returns `NOT_SUPPORTED` and is fine.
 - So XAL thought there was no device key every time, generated a new one, and the sign-in had to start over.
 - Fix: treat `ERROR_NOT_FOUND` as "the host has no credentials" too (`patches/wine/advapi32-steamac.patch`).
+- Verified (NotProton): the DeviceKey hash stays the same across launches, tokens refresh silently, and the sign-in screen no longer appears. `tools/cred-test/` tests CredWrite/Read/Enumerate, the no-match case, and BCrypt ECDSA.
 - **On Hadron**: Highball's Wine 0034 is the same fix. Wine's DPAPI also mixes the user name into its keys: `crossover` under CrossOver, `steamuser` on Hadron. Changing the name leaves the old sign-in data unreadable (tested with `tools/cred-test/dpapitest.c`), hence 0054, which keeps `crossover` for a prefix from NotProton.
 
 ### 2. Vertical stripes and a yellow-blue cast on the loading screen background

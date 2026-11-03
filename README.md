@@ -61,6 +61,7 @@ DXVK 和 vkd3d-proton 跟遊戲在同一個行程裡。編成 ARM64EC 之後遊�
 - Wine 的 `CredEnumerateW` 會把登錄檔裡的憑證，跟 mountmgr 從宿主鑰匙圈查到的合在一起。macOS 版的 `search_credentials` 找不到符合項目時回 `STATUS_NOT_FOUND`，到 advapi32 變成 `ERROR_NOT_FOUND`（1168）；advapi32 只把 `ERROR_NOT_SUPPORTED` 當成「宿主沒有」，所以整個列舉失敗。Linux 回的是 `NOT_SUPPORTED`，不會出事。
 - 結果 XAL 每次都以為沒有裝置金鑰，重新產生一把，登入也就跟著要重來。
 - 修法：`ERROR_NOT_FOUND` 也當成宿主沒有憑證（`patches/wine/advapi32-steamac.patch`）。
+- 驗證（NotProton）：DeviceKey 的雜湊重開後不變，權杖靜默更新，沒有再跳登入畫面。`tools/cred-test/` 測 CredWrite／Read／Enumerate、沒有符合項目的情況、BCrypt ECDSA。
 - **Hadron 路線**：Highball 的 Wine 0034 是同一個修法。另外 Wine 的 DPAPI 把使用者名稱混進金鑰，CrossOver 底下是 `crossover`、Hadron 是 `steamuser`，名字一換，舊的登入資料就解不開（`tools/cred-test/dpapitest.c` 實測），所以加了 0054，NotProton 留下的 prefix 照舊用 `crossover`。
 
 ### 2. 載入畫面背景整片直條紋、偏黃藍

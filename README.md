@@ -37,6 +37,8 @@ NOTPROTON_STEAMAC=1 NOTPROTON_RUNNER_VARIANT=steamacfex+steamackk+steamacadv+ste
 
 D3D 這層靠 NotProton 的外掛（`NOTPROTON_STEAMAC=1`，設定在 [`config/notproton-plugin-steamac.conf`](config/notproton-plugin-steamac.conf)）：每次啟動把 DXVK 和 vkd3d-proton 的 DLL 放進 prefix 的 `system32`，Vulkan 指到 KosmicKrisp，並設 `VKD3D_FEATURE_LEVEL=12_1`、`VKD3D_SHADER_MODEL=6_7`。目前用的是 DXVK `3cb664e1`（v2.6.2-23）和 vkd3d-proton `21a49c97`（v3.0b）各加一個 patch，讓 D3D11 和 D3D12 之間透過宿主記憶體共用貼圖（`patches/dxvk/`、`patches/vkd3d-proton/`），用 `tools/d3d-build/` 編和換。
 
+這些 DLL 跟遊戲在同一個行程裡，平常編成 x86-64，跟遊戲一起跑在 FEX 裡。`tools/d3d-build/` 也能編成 ARM64EC（`ARCH=arm64ec`，llvm-mingw）：遊戲照樣當 x64 DLL 載入，裡面的程式碼直接跑原生 ARM64，D3D 轉 Vulkan 這一步不用再模擬。離線測試（`tools/d3d-bench/`）正確性都過，D3D12 錄每次 draw 的時間少約 7–16%，第一次建 PSO 快很多（8 條執行緒同時建 96 個：x64 0.6–1 秒、ARM64EC 0.03 秒）；代價是遊戲每次呼叫都要跨一次 x64／ARM64EC 的邊界，D3D11 這種一次只做一點事的呼叫反而慢（約 50 → 190 ns）。**還沒在遊戲裡驗**，換法是 `swap-np-d3d.sh ec`。
+
 ## 修掉的問題
 
 ### 1. Xbox 每次重開都要重新登入
@@ -89,7 +91,8 @@ D3D 這層靠 NotProton 的外掛（`NOTPROTON_STEAMAC=1`，設定在 [`config/n
 | `tools/wine-advapi32/` | 從上游 Wine 11.17 原始碼編 ARM64X `advapi32.dll` |
 | `tools/wine-msvproc/` | 編 ARM64X `msvproc.dll`，`variant.sh` 比對 sha256 後裝進 NotProton variant |
 | `tools/kk-build/` | 照 fxgl/steamac v1.9.7 的方式給 NotProton 編 KosmicKrisp |
-| `tools/d3d-build/` | 編 DXVK／vkd3d-proton，`swap-np-d3d.sh` 備份、換檔、還原 |
+| `tools/d3d-build/` | 編 DXVK／vkd3d-proton（x64 或 ARM64EC），`swap-np-d3d.sh` 備份、換檔、還原 |
+| `tools/d3d-bench/` | D3D11／D3D12 轉 Vulkan 的 CPU 成本（x64 與 ARM64EC 版比較），`ectest/` 是 ARM64EC DLL 的 C++ 例外與回呼測試 |
 | `tools/cred-test/` | Credential Manager 與 BCrypt 測試 |
 | `tools/dr-test/` | `SetThreadContext` 除錯暫存器測試 |
 | `tools/eh-test/` | ARM64EC 例外處理與斷點恢復測試 |

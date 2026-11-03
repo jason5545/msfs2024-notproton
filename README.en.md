@@ -37,6 +37,8 @@ NOTPROTON_STEAMAC=1 NOTPROTON_RUNNER_VARIANT=steamacfex+steamackk+steamacadv+ste
 
 The D3D layer comes from a NotProton plugin (`NOTPROTON_STEAMAC=1`, configured in [`config/notproton-plugin-steamac.conf`](config/notproton-plugin-steamac.conf)). On every launch it copies the DXVK and vkd3d-proton DLLs into the prefix's `system32`, points Vulkan at KosmicKrisp, and sets `VKD3D_FEATURE_LEVEL=12_1` and `VKD3D_SHADER_MODEL=6_7`. The current builds are DXVK `3cb664e1` (v2.6.2-23) and vkd3d-proton `21a49c97` (v3.0b), each with one patch that lets D3D11 and D3D12 share textures through host memory (`patches/dxvk/`, `patches/vkd3d-proton/`). `tools/d3d-build/` builds and swaps them.
 
+These DLLs live in the game's process. Normally they are built for x86-64 and run inside FEX together with the game. `tools/d3d-build/` can also build them as ARM64EC (`ARCH=arm64ec`, llvm-mingw): the game still loads them as x64 DLLs, but their code runs as native ARM64, so the D3D-to-Vulkan translation is no longer emulated. Offline tests (`tools/d3d-bench/`) pass all correctness checks; recording a D3D12 draw takes about 7–16% less time, and first-time PSO creation is much faster (96 PSOs on 8 threads at once: 0.6–1 s for x64, 0.03 s for ARM64EC). The cost is that every call from the game crosses the x64/ARM64EC boundary, so D3D11 calls that do very little each get slower (about 50 → 190 ns). **Not yet tested in the game**; `swap-np-d3d.sh ec` swaps them in.
+
 ## Problems fixed
 
 ### 1. Xbox sign-in required on every launch
@@ -89,7 +91,8 @@ These patches were written with AI assistance. FEX's `CONTRIBUTING.md` says it d
 | `tools/wine-advapi32/` | Builds ARM64X `advapi32.dll` from upstream Wine 11.17 source |
 | `tools/wine-msvproc/` | Builds ARM64X `msvproc.dll`; `variant.sh` checks the sha256 and installs it into the NotProton variant |
 | `tools/kk-build/` | Builds KosmicKrisp for NotProton the same way fxgl/steamac v1.9.7 does |
-| `tools/d3d-build/` | Builds DXVK and vkd3d-proton; `swap-np-d3d.sh` backs up, swaps, and restores the DLLs |
+| `tools/d3d-build/` | Builds DXVK and vkd3d-proton (x64 or ARM64EC); `swap-np-d3d.sh` backs up, swaps, and restores the DLLs |
+| `tools/d3d-bench/` | CPU cost of the D3D11/D3D12-to-Vulkan translation (x64 vs. ARM64EC builds); `ectest/` checks C++ exceptions and callbacks in an ARM64EC DLL |
 | `tools/cred-test/` | Credential Manager and BCrypt tests |
 | `tools/dr-test/` | `SetThreadContext` debug register test |
 | `tools/eh-test/` | ARM64EC exception handling and breakpoint resume test |

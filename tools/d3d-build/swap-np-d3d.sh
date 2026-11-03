@@ -1,10 +1,12 @@
 #!/bin/bash
-# swap-np-d3d.sh status|hostshare|restore — swaps the 5 D3D DLLs that NotProton's NOTPROTON_STEAMAC plugin stages
+# swap-np-d3d.sh status|hostshare|ec|restore — swaps the 5 D3D DLLs that NotProton's NOTPROTON_STEAMAC plugin stages
 # into the MSFS prefix (logs/notproton-log.md 14.7). NotProton copies the stage folder into system32 on every
 # launch when the files differ, so this only takes effect at the next game start; the prefix is not touched.
 #
 #   status     sha256 of the stage folder and which known set it is
 #   hostshare  back up the stage folder, then install DXVK 68b7647d + vkd3d-proton eacf43b9 (host-memory sharing)
+#   ec         same sources as hostshare (+ DXVK 4286731d, a libc++ build fix) built as ARM64EC with llvm-mingw: the
+#              game still loads them as x64 DLLs, but their code runs natively instead of inside FEX (log section 22)
 #   restore    put back the original set (DXVK 3cb664e1 + vkd3d-proton 3.0b, the game's set since T5)
 #
 # Every copy is checked against the sha256 below before and after; anything unexpected stops the script.
@@ -12,6 +14,7 @@ set -euo pipefail
 STAGE="$HOME/Library/Application Support/notproton/steamac/d3d"
 NEW=$HOME/GitHub/msfs-src/np-video/d3d-host
 ORIG=$HOME/GitHub/msfs-src/np-video/d3d-np
+EC=$HOME/GitHub/msfs-src/np-video/d3d-ec
 BACKUP=$HOME/GitHub/msfs-src/backup
 DLLS="dxgi d3d11 d3d10core d3d12 d3d12core"
 
@@ -29,16 +32,24 @@ sha_new() { case $1 in
   d3d12) echo 395fa4f357f5a2d30f5ae86ae39d2e337bd53c13b6b6fe7166a9bf34299c2807 ;;
   d3d12core) echo 252e98c39146049adeebc926d2c9e7ca183f98019ac684439653fe9d95251a32 ;;
 esac; }
+sha_ec() { case $1 in
+  dxgi) echo b5b519e619145c18f7a8b781814d0310fca44222babf435b5ed653d0f513f6f0 ;;
+  d3d11) echo d75cc664f11a853af8dc89a4d28d61f7074bde393617b385aab3f3fbb7d39a03 ;;
+  d3d10core) echo 812ad3d253c68ea715e6424cff4e873403bb42b30daf7ff74f7a50deee9c1f77 ;;
+  d3d12) echo 624488f6f694ee00bac1ecdd802b02b8348b6c659ba296f84f0c2c1ccc26b963 ;;
+  d3d12core) echo 62126809d54924bd390702f44ce75587f576c5d1312a82e3abff664141a0150d ;;
+esac; }
 sha() { shasum -a 256 "$1" | cut -d' ' -f1; }
 
 which_set() {
-  local o=1 n=1 d
+  local o=1 n=1 e=1 d
   for d in $DLLS; do
     local s; s=$(sha "$STAGE/$d.dll")
     [ "$s" = "$(sha_orig $d)" ] || o=0
     [ "$s" = "$(sha_new $d)" ] || n=0
+    [ "$s" = "$(sha_ec $d)" ] || e=0
   done
-  if [ $o = 1 ]; then echo original; elif [ $n = 1 ]; then echo hostshare; else echo unknown; fi
+  if [ $o = 1 ]; then echo original; elif [ $n = 1 ]; then echo hostshare; elif [ $e = 1 ]; then echo ec; else echo unknown; fi
 }
 
 check_dir() { # check_dir <dir> <sha function>
@@ -63,6 +74,7 @@ install_set() { # install_set <dir> <sha function> <name>
 case "${1:-status}" in
   status) for d in $DLLS; do printf '%-14s %s\n' "$d.dll" "$(sha "$STAGE/$d.dll")"; done; echo "set: $(which_set)" ;;
   hostshare) install_set "$NEW" sha_new hostshare ;;
+  ec) install_set "$EC" sha_ec ec ;;
   restore) install_set "$ORIG" sha_orig original ;;
-  *) echo "usage: $0 status|hostshare|restore" >&2; exit 2 ;;
+  *) echo "usage: $0 status|hostshare|ec|restore" >&2; exit 2 ;;
 esac

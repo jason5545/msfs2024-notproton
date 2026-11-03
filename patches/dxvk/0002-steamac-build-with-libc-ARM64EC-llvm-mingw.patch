@@ -1,0 +1,32 @@
+From 4286731d5f657910605d91bcb38335aa001b355e Mon Sep 17 00:00:00 2001
+From: jason chien <3936511+jason5545@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 09:32:41 +0800
+Subject: [PATCH] steamac: build with libc++ (ARM64EC, llvm-mingw)
+
+libc++ 23 fails to instantiate unordered_map::emplace(piecewise_construct,
+tuple<>(), ...) (its key-extraction path indexes the empty key tuple).
+Pass the default key explicitly; the key is the same.
+
+The missing <algorithm>/<new>/<exception> includes in DXVK and
+vkd3d-proton's subprojects are force-included from the meson cross file
+instead (msfs2024-notproton tools/d3d-build/cross-arm64ec.txt).
+---
+ src/dxvk/dxvk_pipemanager.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/dxvk/dxvk_pipemanager.cpp b/src/dxvk/dxvk_pipemanager.cpp
+index 84a07c1f..47df13b2 100644
+--- a/src/dxvk/dxvk_pipemanager.cpp
++++ b/src/dxvk/dxvk_pipemanager.cpp
+@@ -443,7 +443,7 @@ namespace dxvk {
+ 
+     auto iter = m_shaderLibraries.emplace(
+       std::piecewise_construct,
+-      std::tuple(),
++      std::tuple(key),
+       std::tuple(m_device, this, key, layout));
+     return &iter.first->second;
+   }
+-- 
+2.56.0
+

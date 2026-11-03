@@ -1,0 +1,23 @@
+# meson cross file for ARM64EC with llvm-mingw (bin dir must be on PATH; build-d3d.sh does that).
+[binaries]
+c = 'arm64ec-w64-mingw32-clang'
+cpp = 'arm64ec-w64-mingw32-clang++'
+ar = 'llvm-ar'
+strip = 'llvm-strip'
+windres = 'arm64ec-w64-mingw32-windres'
+widl = 'arm64ec-w64-mingw32-widl'
+widl-mingw-tools-fallback = 'arm64ec-w64-mingw32-widl'
+
+[built-in options]
+# libc++ (llvm-mingw) doesn't pull these in transitively the way libstdc++ does; several files in DXVK and in
+# vkd3d-proton's nested subprojects (dxil-spirv, dxbc-spirv) rely on that. Force-include instead of patching submodules.
+cpp_args = ['-include', 'algorithm', '-include', 'new', '-include', 'exception']
+
+[properties]
+needs_exe_wrapper = true
+
+[host_machine]
+system = 'windows'
+cpu_family = 'aarch64'
+cpu = 'arm64ec'
+endian = 'little'

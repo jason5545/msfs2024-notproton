@@ -8,7 +8,8 @@ The approach: build a few open-source components from source and layer them onto
 
 ## Status (2026-11-03)
 
-- The game runs from start to finish: intro videos, loading, Xbox sign-in that happens automatically after pressing Start (no more signing in on every launch), the world map (free flight menu), and a clean exit.
+- The game runs from start through the menus: intro videos, loading, Xbox sign-in that happens automatically after pressing Start (no more signing in on every launch), and the world map (free flight menu).
+- After pressing "Fly", loading finishes and the game reaches the airport: the cockpit renders correctly, the aircraft sits on the runway, about 16 FPS (Nov 3).
 - No actual flight yet.
 
 ## Environment
@@ -30,7 +31,7 @@ NOTPROTON_STEAMAC=1 NOTPROTON_RUNNER_VARIANT=steamacfex+steamackk+steamacadv+ste
 | Variant | Replaces | Source |
 |---|---|---|
 | `steamacfex` | `xtajit64.dll` (FEX ARM64EC) | Upstream FEX `02e24ca5c` plus the six patches in `patches/fex/` (x86 execute breakpoints, exception logging, RF fix, SMC hot pages) |
-| `steamackk` | Vulkan loader 1.4.363, wired to KosmicKrisp | Mesa `ce576c29` plus the fxgl/steamac v1.9.7 KosmicKrisp patches, `tools/kk-build/` |
+| `steamackk` | Vulkan loader 1.4.363, wired to KosmicKrisp | Mesa `ce576c29` plus the fxgl/steamac v1.9.7 KosmicKrisp patches and the four in `patches/kk/` (ROV and more, see problem 5), `tools/kk-build/` |
 | `steamacadv` | `advapi32.dll` | Upstream Wine 11.17 plus `patches/wine/advapi32-steamac.patch`, `tools/wine-advapi32/` |
 | `steamacvproc` | `msvproc.dll` | Upstream Wine 11.17 plus `patches/wine/msvproc-arm64ec-yuv2rgb.patch`, `tools/wine-msvproc/` |
 
@@ -62,6 +63,13 @@ The D3D layer comes from a NotProton plugin (`NOTPROTON_STEAMAC=1`, configured i
 
 - During loading, one stretch hits four breakpoints repeatedly for about 700 rounds, and every round involves self-modifying code (SMC). FEX ARM64EC takes a page fault for every SMC write, so each round took about 0.8 s and the whole stretch about 9 minutes.
 - After porting the "hot pages" scheme from the Linux FEX work (a page that faults too often switches to per-instruction checks), the 698 rounds finish in 85.8 s (0006 in `patches/fex/`). `tools/smc-test/` measures the cost of a single SMC.
+
+### 5. The game froze after pressing "Fly"
+
+- MSFS uses D3D12 ROVs (rasterizer ordered views). The game requires Feature Level 12_1, so `VKD3D_FEATURE_LEVEL=12_1` makes vkd3d-proton report support and emit fragment shader interlock SPIR-V anyway. KosmicKrisp did not recognise `begin/end_invocation_interlock`, printed `Unknown intrinsic`, and Metal refused the shader; `vkEndCommandBuffer` returned `VK_ERROR_INVALID_SHADER_NV`, vkd3d-proton submitted the command buffer anyway, and `vkQueueSubmit2` crashed. 270 such shaders already failed in the main menu, but they were only drawn after pressing "Fly". Upstream Mesa's KosmicKrisp does not have this yet.
+- Metal's counterpart is raster order groups. Measured on an M5 Max (N overlapping fragments each read, add one, and write back), ordering only holds for accesses derived from a parameter that carries the `raster_order_group` attribute; texture handles that KosmicKrisp casts from a plain address do not count.
+- Fix (0001 in `patches/kk/`): fragment shaders that use interlock get extra attributed parameters, and every writable texture and device memory access derives its address from them; the driver now advertises `VK_EXT_fragment_shader_interlock`. 0002 drops only the draw of a pipeline that failed to compile instead of failing the whole command buffer, 0003 saves the MSL that Metal refuses, and 0004 removes the `PrimitiveShadingRateKHR` output KosmicKrisp has no equivalent for (12 more vertex shaders in the main menu).
+- Verification: a native Vulkan test with N=1024 gives exactly 1024 on every pixel with interlock, while the control without it loses updates. In game, `Unknown intrinsic` went from 270 to 0, and pressing "Fly" now reaches the airport with the cockpit rendering correctly.
 
 ## FEX changes
 

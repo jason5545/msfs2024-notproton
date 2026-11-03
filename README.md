@@ -8,7 +8,8 @@
 
 ## 現況（2026/11/3）
 
-- 從開機一路走完：開場影片、載入、按 Start 後 Xbox 自動登入（不用每次重新登入）、進到世界地圖（自由飛行選單），最後正常結束。
+- 從開機一路走完：開場影片、載入、按 Start 後 Xbox 自動登入（不用每次重新登入）、進到世界地圖（自由飛行選單）。
+- 按「開始飛行」後載入完成，進到機場：駕駛艙畫面正常，停在跑道上，約 16 FPS（11/3）。
 - 還沒實際起飛。
 
 ## 環境
@@ -30,7 +31,7 @@ NOTPROTON_STEAMAC=1 NOTPROTON_RUNNER_VARIANT=steamacfex+steamackk+steamacadv+ste
 | variant | 換掉什麼 | 來源 |
 |---|---|---|
 | `steamacfex` | `xtajit64.dll`（FEX ARM64EC） | 上游 FEX `02e24ca5c` 加 `patches/fex/` 六個 patch（x86 執行斷點、例外紀錄、RF 修正、SMC 熱頁） |
-| `steamackk` | Vulkan loader 1.4.363，接 KosmicKrisp | Mesa `ce576c29` 加 fxgl/steamac v1.9.7 的 KosmicKrisp patch，`tools/kk-build/` |
+| `steamackk` | Vulkan loader 1.4.363，接 KosmicKrisp | Mesa `ce576c29` 加 fxgl/steamac v1.9.7 的 KosmicKrisp patch，再加 `patches/kk/` 四個 patch（ROV 等，見問題 5），`tools/kk-build/` |
 | `steamacadv` | `advapi32.dll` | 上游 Wine 11.17 加 `patches/wine/advapi32-steamac.patch`，`tools/wine-advapi32/` |
 | `steamacvproc` | `msvproc.dll` | 上游 Wine 11.17 加 `patches/wine/msvproc-arm64ec-yuv2rgb.patch`，`tools/wine-msvproc/` |
 
@@ -62,6 +63,13 @@ D3D 這層靠 NotProton 的外掛（`NOTPROTON_STEAMAC=1`，設定在 [`config/n
 
 - 載入中有一段會反覆命中四個斷點約 700 輪，每輪都牽涉自我修改程式碼（SMC）。ARM64EC 的 FEX 每次 SMC 都要走一次頁故障，一輪約 0.8 秒，整段要 9 分鐘左右。
 - 把在 Linux 版 FEX 做過的「熱頁」（同一頁故障太多次就改成逐指令檢查）搬到 ARM64EC 之後，698 輪 85.8 秒跑完（`patches/fex/` 的 0006）。`tools/smc-test/` 量單次 SMC 的成本。
+
+### 5. 按「開始飛行」後卡死
+
+- MSFS 用 D3D12 的 ROV（rasterizer ordered views）。遊戲要 Feature Level 12_1，所以 `VKD3D_FEATURE_LEVEL=12_1` 讓 vkd3d-proton 回報支援，照樣產生 fragment shader interlock 的 SPIR-V。KosmicKrisp 不認得 `begin/end_invocation_interlock`，印成 `Unknown intrinsic`，Metal 編不過；`vkEndCommandBuffer` 回 `VK_ERROR_INVALID_SHADER_NV`，vkd3d-proton 照樣送出，接著在 `vkQueueSubmit2` 崩潰。主選單時就有 270 個這種 shader，按開始飛行才真的畫到。Mesa 上游的 KosmicKrisp 也還沒有。
+- Metal 對應的功能是 raster order group，但實測（M5 Max，N 個重疊片段各做一次讀出、加一、寫回）只有「從帶 `raster_order_group` 屬性的參數推出來」的存取才有順序保證；KosmicKrisp 從普通位址轉型拿到的貼圖 handle 不算。
+- 修法（`patches/kk/` 的 0001）：用到 interlock 的 fragment shader 多帶幾個有屬性的參數，可寫貼圖和 device 記憶體的存取位址都從這些參數推出來，並宣告 `VK_EXT_fragment_shader_interlock`。0002 讓編不過的 pipeline 只丟掉那次繪圖、不讓整個 command buffer 失敗，0003 把 Metal 拒絕的 MSL 存下來，0004 拿掉 KosmicKrisp 沒有對應的 `PrimitiveShadingRateKHR` 輸出（主選單另外 12 個 vertex shader）。
+- 驗證：原生 Vulkan 測試 N=1024 時有 interlock 每個像素剛好 1024，沒有的對照組會掉數。遊戲裡 `Unknown intrinsic` 從 270 次變 0 次，按開始飛行後進到機場，駕駛艙畫面正常。
 
 ## FEX 的修改
 

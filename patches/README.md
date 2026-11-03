@@ -11,13 +11,14 @@
 
 ## kk/
 
-套在 Mesa `ce576c29ed` 加 fxgl/steamac v1.9.7 的 KosmicKrisp patch 0001–0077 之後：`tools/kk-build/build-kk.sh prepare patches/kk/0001-… patches/kk/0002-… patches/kk/0003-…`（依序）。
+套在 Mesa `ce576c29ed` 加 fxgl/steamac v1.9.7 的 KosmicKrisp patch 0001–0077 之後：`tools/kk-build/build-kk.sh prepare patches/kk/0001-… patches/kk/0002-… patches/kk/0003-… patches/kk/0004-…`（依序）。
 
 | 檔案 | 內容 |
 |---|---|
 | `0001-…fragment-shader-interlock…` | D3D12 的 ROV（vkd3d-proton 轉成 `SPV_EXT_fragment_shader_interlock`）改用 Metal 的 raster order group。用到 interlock 的 fragment shader，每種可寫貼圖型別多一個 `[[buffer(3+N)]]` 參數，device 記憶體多一個 `[[buffer(11), raster_order_group(0)]]` 參數，所有存取的位址都從這些參數推出來。並宣告 `VK_EXT_fragment_shader_interlock`。原本 `begin/end_invocation_interlock` 會印成 `Unknown intrinsic`，Metal 編譯失敗，`vkEndCommandBuffer` 回 `VK_ERROR_INVALID_SHADER_NV`，接著 `vkQueueSubmit2` 崩潰 |
 | `0002-…drop-the-draw…` | 背景編譯失敗的 pipeline 只丟掉那次繪圖，不再讓 `vkEndCommandBuffer` 回錯誤（vkd3d-proton 會照樣送出這種 command buffer，在 `vkQueueSubmit2` 崩潰） |
 | `0003-…keep-the-MSL…` | Metal 編譯失敗時把 MSL 和錯誤存到 `~/Library/Logs/kk-failed-msl/`（最多 200 份） |
+| `0004-…PrimitiveShadingRateKHR…` | 拿掉 vertex shader 的 `PrimitiveShadingRateKHR` 輸出：dxil-spirv 看到 `SV_ShadingRate` 就會宣告，KK 沒有可變速率著色、MSL 也沒有這個輸出名稱，原本印成 `(null)` 編不過（MSFS 主選單 12 個 shader）。沒有 VRS 本來就是全速率著色 |
 
 Metal 只對「透過帶 `raster_order_group` 屬性的參數」做的存取保證順序；從普通位址轉型拿到的貼圖 handle 或結構成員，屬性不會生效（M5 Max 實測：N 個重疊片段各做一次讀出加一寫回，只有經過參數的才剛好等於 N）。
 

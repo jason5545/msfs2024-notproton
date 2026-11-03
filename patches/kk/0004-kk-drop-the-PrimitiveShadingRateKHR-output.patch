@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: jason chien <3936511+jason5545@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 08:00:00 +0800
+Subject: [PATCH] kk: drop the PrimitiveShadingRateKHR output
+
+dxil-spirv declares BuiltIn PrimitiveShadingRateKHR for every D3D12 shader
+that writes SV_ShadingRate, whether or not the device has variable rate
+shading. KosmicKrisp does not expose VK_KHR_fragment_shading_rate and
+nir_to_msl has no name for VARYING_SLOT_PRIMITIVE_SHADING_RATE, so the
+vertex output became "uint (null) [[(null)]]" and Metal refused the
+library (12 vertex shaders of MSFS 2024 in the main menu). Without
+variable rate shading every primitive is shaded at the full rate: turn the
+output variable into a temporary before IO lowering so it is removed.
+
+Applies after 0003.
+---
+diff --git a/src/kosmickrisp/vulkan/kk_shader.c b/src/kosmickrisp/vulkan/kk_shader.c
+index c0bceca8113..010e1af01fd 100644
+--- a/src/kosmickrisp/vulkan/kk_shader.c
++++ b/src/kosmickrisp/vulkan/kk_shader.c
+@@ -796,6 +796,30 @@ kk_lower_nir(struct kk_device *dev, nir_shader *nir, bool emulated_stage,
+    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ubo,
+             kk_buffer_addr_format(rs->uniform_buffers));
+ 
++   /* Metal has no per-primitive shading rate and KosmicKrisp does not expose
++    * VK_KHR_fragment_shading_rate, yet dxil-spirv declares the
++    * PrimitiveShadingRateKHR output of every D3D12 shader that writes
++    * SV_ShadingRate (MSFS 2024 has such vertex shaders). The slot has no MSL
++    * name, so the library failed to compile. Without variable rate shading
++    * every primitive is shaded at the full rate: drop the output. */
++   if (nir->info.stage != MESA_SHADER_FRAGMENT) {
++      bool dropped = false;
++      nir_foreach_shader_out_variable(var, nir) {
++         if (var->data.location == VARYING_SLOT_PRIMITIVE_SHADING_RATE) {
++            var->data.mode = nir_var_shader_temp;
++            dropped = true;
++         }
++      }
++      if (dropped) {
++         NIR_PASS(_, nir, nir_fixup_deref_modes);
++         NIR_PASS(_, nir, nir_lower_global_vars_to_local);
++         NIR_PASS(_, nir, nir_lower_vars_to_ssa);
++         NIR_PASS(_, nir, nir_opt_dce);
++         NIR_PASS(_, nir, nir_remove_dead_variables, nir_var_function_temp,
++                  NULL);
++      }
++   }
++
+    NIR_PASS(_, nir, nir_lower_io, nir_var_shader_in | nir_var_shader_out,
+             type_size_vec4,
+             nir_lower_io_lower_64bit_to_32 |

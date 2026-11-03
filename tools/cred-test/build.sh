@@ -14,3 +14,6 @@ for d in kernel32 advapi32 bcrypt; do "$LLVM/llvm-dlltool" -m i386:x86-64 -d "$O
 /opt/homebrew/bin/lld-link /nologo /entry:Entry /subsystem:console /nodefaultlib \
   /out:"$OUT/credtest.exe" "$OUT/credtest.obj" "$OUT/kernel32.lib" "$OUT/advapi32.lib" "$OUT/bcrypt.lib"
 shasum -a 256 "$OUT/credtest.exe"
+# dpapitest.exe (mingw CRT): does CryptProtectData's blob open again under the same / another user name.
+x86_64-w64-mingw32-gcc -O1 -o "$OUT/dpapitest.exe" dpapitest.c -lcrypt32
+shasum -a 256 "$OUT/dpapitest.exe"

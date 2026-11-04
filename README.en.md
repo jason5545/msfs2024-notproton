@@ -1,12 +1,12 @@
-# Squark: MSFS 2024 on Apple Silicon Macs (the Hadron route)
+# Squark: MSFS 2024 on Apple Silicon Macs
 
 [正體中文](README.md) | **English**
 
-Fixes and tools for running Microsoft Flight Simulator 2024 (Steam version) on Apple Silicon Macs. The base is our fork of [Hadron](https://github.com/nheisterkamp/Hadron), a fork of [NotProton](https://github.com/NotProtonNot/NotProton) that adds Steam Play to the native macOS Steam client and builds its own arm64 Wine runtime from source. Its arm64 engine is replaced with the one [Highball](https://github.com/gauthierpiarrette/highball-engine) tuned for MSFS, and our own D3D12 graphics layer is added on top (vkd3d-proton and DXVK built for ARM64EC, running on KosmicKrisp).
+Fixes and tools for running Microsoft Flight Simulator 2024 (Steam version) on Apple Silicon Macs. The app is Squark, our fork of [Hadron](https://github.com/nheisterkamp/Hadron) ([`jason5545/squark-app`](https://github.com/jason5545/squark-app)); Hadron is a fork of [NotProton](https://github.com/NotProtonNot/NotProton) that adds Steam Play to the native macOS Steam client and builds its own arm64 Wine runtime from source. Its arm64 engine is replaced with the one [Highball](https://github.com/gauthierpiarrette/highball-engine) tuned for MSFS, and our own D3D12 graphics layer is added on top (vkd3d-proton and DXVK built for ARM64EC, running on KosmicKrisp).
 
 Everything is built from open source, and the game files are never touched.
 
-The name is squawk (a transponder code) plus quark (what hadrons are made of); a squark is also the quark's partner particle in supersymmetry. This repo was renamed from `msfs2024-notproton` on Nov 3. Until midday Nov 3 the work went through NotProton (CrossOver 27 Preview's Wine); the patches and tools from that period stay here as a record.
+The name is squawk (a transponder code) plus quark (what hadrons are made of); a squark is also the quark's partner particle in supersymmetry. This repo was renamed from `msfs2024-notproton` on Nov 3. Until midday Nov 3 the work went through NotProton (CrossOver 27 Preview's Wine); the patches and tools from that period stay here as a record. On Nov 4 the forked app was renamed Squark as well: it had drifted too far from upstream Hadron to share its name.
 
 ## Status (2026-11-04)
 
@@ -14,6 +14,7 @@ The name is squawk (a transponder code) plus quark (what hadrons are made of); a
 - After the switch to Hadron: the runtime is built and passes the full regression set (Hadron's own `check-runtime.sh`, 8 checks; Highball's x64-fidelity tests with the numbers its README lists; our debug-register, exception, SMC, TSO, credential and DPAPI tests; D3D12 and D3D11↔D3D12 shared textures on KosmicKrisp, pixel-identical), and Steam is hooked up.
 - First launch on Hadron, the afternoon of Nov 3: automatic Xbox sign-in, no stripes on the loading screen, about 9 minutes from launch to the title screen. Free Flight with the A330-200 at Taoyuan RCTP 05R: "Start flight" reached the cockpit in under two minutes, rendered correctly with the instruments running, at about 30 FPS on the runway (about 60 FPS in the main menu). Quit to Desktop from the main menu ended it cleanly. The whole run was in background mode, see "Background mode" below.
 - Nov 4, the first add-on bought from a developer's own store: the TFDi MD-11 (its Install Manager is a WPF program). In Wine it froze as soon as a simulator was ticked: winemac's main thread queued an OpenGL update and then waited for itself. Upstream Wine still has this, so we fixed it with Wine patch 0060. After that the installer ran to the end on Wine's own Wine Mono, no .NET Framework needed. The MD-11F loads into the cockpit at Taipei Songshan RCSS with the PFD, ND, EICAS and MCDU all working, at about 15 FPS on the runway (the A330 does about 30 FPS on the same Mac).
+- Nov 4 afternoon: the forked app became Squark (its name, data folder and the tool names in Steam), at [`jason5545/squark-app`](https://github.com/jason5545/squark-app). FEX patches 0035–0038 (5.5% faster on the FBW A380 benchmark) are in the game's runtime and prefix; the MD-11's FPS in the game has not been measured with them yet.
 
 ![TFDi MD-11F cockpit on the runway at RCSS, with the PFD, ND, EICAS and MCDU rendering](docs/img/md11-rcss-cockpit.jpg)
 
@@ -22,9 +23,9 @@ The name is squawk (a transponder code) plus quark (what hadrons are made of); a
 | Item | Version |
 |---|---|
 | Mac | M5 Max (40-core GPU), 128 GB, macOS 27.2 |
-| Hadron | fork [`jason5545/Hadron`](https://github.com/jason5545/Hadron), branch `steamac` (upstream `87c4265` plus our changes), Hadron 1.0.3, Sparkle auto-update off |
+| Squark (app) | [`jason5545/squark-app`](https://github.com/jason5545/squark-app), branch `steamac`: Hadron upstream `87c4265` plus our changes, renamed from Hadron on Nov 4. Squark 1.0.3, Sparkle auto-update off |
 | Wine runtime | `wine-11.18-fex`: WineHQ 11.18 with Hadron's patches 0001–0003 and 0005, Highball's `patches-arm64` 0018–0052 (highball-engine `2eedc50`), and our 0004 and 0053–0060; the runtime carries Homebrew's sdl2-compat and SDL3, and winebus goes through SDL (as Highball does) |
-| FEX | FEX-2610 with Highball's `fex/patches` 0001–0033; the unix side is Highball's `fexunixlib_darwin.cpp` (hardware TSO on every thread) |
+| FEX | FEX-2610 with Highball's `fex/patches` 0001–0033; the unix side is Highball's `fexunixlib_darwin.cpp` (hardware TSO on every thread). Our 0035–0038 (tuned on the FBW A380 benchmark, described in the fork's `runtime/fex/highball/README.md`) went into the game's runtime and prefix on Nov 4; the MSFS recipe turns 0037 on for `\wasm\msfs2024\` |
 | Graphics | KosmicKrisp (Mesa `ce576c29ed` plus fxgl/steamac v1.9.7's 0001–0077, plus [`patches/kk/`](patches/kk/)); vkd3d-proton `21a49c97` (v3.0b) and DXVK `3cb664e1` (v2.6.2-23) plus [`patches/vkd3d-proton/`](patches/vkd3d-proton/) and [`patches/dxvk/`](patches/dxvk/), built for ARM64EC |
 | Other | GStreamer 1.28.7 (the official framework, trimmed with Highball's scripts; without it the start screen stays black) |
 | MSFS 2024 | Steam AppID 2537590, 1.9.21.0 |
@@ -49,13 +50,13 @@ Wine's loader is the runtime's `Wine.app`. It needs the Cross-architecture Compa
 
 ## Graphics and launch options
 
-In the game's Hadron panel, "Graphics" set to "vkd3d-proton + KosmicKrisp" (`HADRON_GRAPHICS=vkd3d`) puts the overlays `lib/graphics/vkd3d` and `lib/graphics/dxvk` ahead of Wine's own DLLs, points Vulkan at KosmicKrisp, and sets `VKD3D_FEATURE_LEVEL=12_1`, `VKD3D_SHADER_MODEL=6_7` and `DXVK_CONFIG`. Only the arm64 (FEX) runtime offers it. MSFS's Steam launch options are still written the NotProton way, and `compat_run.sh` maps them to Hadron's names:
+In the game's Squark panel, "Graphics" set to "vkd3d-proton + KosmicKrisp" (`HADRON_GRAPHICS=vkd3d`) puts the overlays `lib/graphics/vkd3d` and `lib/graphics/dxvk` ahead of Wine's own DLLs, points Vulkan at KosmicKrisp, and sets `VKD3D_FEATURE_LEVEL=12_1`, `VKD3D_SHADER_MODEL=6_7` and `DXVK_CONFIG`. Only the arm64 (FEX) runtime offers it. MSFS's Steam launch options are still written the NotProton way, and `compat_run.sh` maps them to the `HADRON_*` names (which kept their names when the app became Squark):
 
 ```
 CX_GRAPHICS_BACKEND=vkd3d NOTPROTON_ENV_JSC_useJIT=false %command%
 ```
 
-`CX_GRAPHICS_BACKEND` maps to `HADRON_GRAPHICS` and `NOTPROTON_ENV_<name>` to `HADRON_ENV_<name>` (a Hadron name already set wins). On the arm64 runtime MSFS (2537590) automatically gets Highball's MSFS SMC settings (`HB_FEX_SMC_RETIRE=1 HB_FEX_SMC_SKIP_SAME=1 HB_FEX_SMC_HOT_MAXINST=64 HB_FEX_VM_FASTPATH=1 HB_FEX_SMC_DEFER_CALLRET=1`); launch options win.
+`CX_GRAPHICS_BACKEND` maps to `HADRON_GRAPHICS` and `NOTPROTON_ENV_<name>` to `HADRON_ENV_<name>` (a Hadron name already set wins). On the arm64 runtime MSFS (2537590) automatically gets Highball's MSFS SMC settings (`HB_FEX_SMC_RETIRE=1 HB_FEX_SMC_SKIP_SAME=1 HB_FEX_SMC_HOT_MAXINST=64 HB_FEX_VM_FASTPATH=1 HB_FEX_SMC_DEFER_CALLRET=1`) and `SQUARK_FEX_ABI_FLAGS=\wasm\msfs2024\` (FEX 0037, only for the WebAssembly modules the game compiles for aircraft and gauges); launch options win.
 
 DXVK and vkd3d-proton run in the game's process. Built for ARM64EC, the game still loads them as x64 DLLs, but their code runs as native ARM64, so translating D3D to Vulkan no longer has to be emulated in FEX along with the game. Offline tests (`tools/d3d-bench/`): recording a D3D12 draw takes about 7–16% less time, and first-time PSO creation is much faster (96 PSOs from 8 threads: 0.6–1 s for x64, 0.03 s for ARM64EC). The cost is one x64/ARM64EC boundary crossing per call, so small D3D11 calls get slower (about 50 → 190 ns). On Nov 3 the game ran on Hadron with this ARM64EC build, and the main menu and cockpit render correctly; in-game FPS has not been compared with the x64 build yet.
 
@@ -64,7 +65,7 @@ DXVK and vkd3d-proton run in the game's process. Built for ARM64EC, the game sti
 While the game is being tested, it must not show up on the user's screen or take the keyboard focus, because the user is working on the same Mac at the time. Three layers:
 
 - **Wine (0056)**: with `HADRON_MAC_BACKGROUND=1`, every window is put on the lowest window level (under the desktop picture) as soon as it is created. It is still on screen, so it keeps drawing and `screencapture -l` can capture it. The program never activates or unhides itself, never moves or confines the host cursor, never changes display modes, and key presses skip the macOS input method.
-- **Hadron's `compat_run.sh`**: the launch option `HADRON_MAC_BACKGROUND=1`, or a one-shot request file `~/Library/Application Support/hadron/background/<AppID>` (valid for 10 minutes). It is set before any Wine process runs (so a prefix update's wineboot stays hidden too); the game is started with `open -g` and Hadron's launch window stays shut. Before the game, Steam runs an install script (`iscriptevaluator.exe`, verb `run`); that run goes in the background as well, but leaves the request for the game's own run (`waitforexitandrun`). On the first try on Nov 3 the install script used up the request and the game came up in the normal mode, on screen (fixed in fork `56dcd8b`).
+- **Squark's `compat_run.sh`**: the launch option `HADRON_MAC_BACKGROUND=1`, or a one-shot request file `~/Library/Application Support/squark/background/<AppID>` (valid for 10 minutes). It is set before any Wine process runs (so a prefix update's wineboot stays hidden too); the game is started with `open -g` and Squark's launch window stays shut. Before the game, Steam runs an install script (`iscriptevaluator.exe`, verb `run`); that run goes in the background as well, but leaves the request for the game's own run (`waitforexitandrun`). On the first try on Nov 3 the install script used up the request and the game came up in the normal mode, on screen (fixed in fork `56dcd8b`).
 - **Input**: hardware input sent from inside Wine (a small Windows program joins the game's wineserver and sends it through win32u's `SendHardwareInput`, the path winemac uses for the Mac's own input), without touching the Mac's cursor or foreground. MSFS buttons need a hover first: two moves and then a click work, and typing into search fields works. A watcher checks the game's and Steam's windows every 30 ms, hides any that gets above the desktop and gives a stolen foreground back. These tools are kept locally, not in the repo.
 
 Over a full run on Nov 3 (launch, sign-in, main menu, Free Flight, cockpit, quit) the game window appeared on screen 0 times and took the foreground 0 times.

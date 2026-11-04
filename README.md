@@ -1,12 +1,12 @@
-# Squark：MSFS 2024 在 Apple Silicon Mac 上（Hadron 路線）
+# Squark：MSFS 2024 在 Apple Silicon Mac 上
 
 **正體中文** | [English](README.en.md)
 
-讓 Microsoft Flight Simulator 2024（Steam 版）在 Apple Silicon Mac 上跑起來的修正與工具。底座是自己 fork 的 [Hadron](https://github.com/nheisterkamp/Hadron)（[NotProton](https://github.com/NotProtonNot/NotProton) 的 fork，macOS 原生 Steam 的 Steam Play，自己從原始碼編 arm64 Wine runtime），arm64 引擎換成 [Highball](https://github.com/gauthierpiarrette/highball-engine) 為 MSFS 調過的那套，再加上我們自己的 D3D12 圖形層（vkd3d-proton＋DXVK 編成 ARM64EC，跑在 KosmicKrisp 上）。
+讓 Microsoft Flight Simulator 2024（Steam 版）在 Apple Silicon Mac 上跑起來的修正與工具。app 是我們從 [Hadron](https://github.com/nheisterkamp/Hadron) fork 出來的 Squark（[`jason5545/squark-app`](https://github.com/jason5545/squark-app)；Hadron 是 [NotProton](https://github.com/NotProtonNot/NotProton) 的 fork，macOS 原生 Steam 的 Steam Play，自己從原始碼編 arm64 Wine runtime），arm64 引擎換成 [Highball](https://github.com/gauthierpiarrette/highball-engine) 為 MSFS 調過的那套，再加上我們自己的 D3D12 圖形層（vkd3d-proton＋DXVK 編成 ARM64EC，跑在 KosmicKrisp 上）。
 
 全部從開放原始碼編，遊戲檔案不動。
 
-名字是 squawk（應答機代碼）加 quark（夸克，組成 hadron 的粒子）；squark 也是超對稱理論裡夸克的夥伴粒子。這個 repo 11/3 從 `msfs2024-notproton` 改名；11/3 中午之前走的是 NotProton（CrossOver 27 Preview 的 Wine）路線，那段的 patch 和工具留在這裡當紀錄。
+名字是 squawk（應答機代碼）加 quark（夸克，組成 hadron 的粒子）；squark 也是超對稱理論裡夸克的夥伴粒子。這個 repo 11/3 從 `msfs2024-notproton` 改名；11/3 中午之前走的是 NotProton（CrossOver 27 Preview 的 Wine）路線，那段的 patch 和工具留在這裡當紀錄。11/4 起，fork 出來的 app 也改叫 Squark：跟上游 Hadron 差太多了，名字分開才不會混淆。
 
 ## 現況（2026/11/4）
 
@@ -14,6 +14,7 @@
 - 換到 Hadron 之後：runtime 編好、整套回歸測試過了（Hadron 自己的 `check-runtime.sh` 8 項、Highball 的 x64 忠實度測試數字跟它的 README 一致、我們的除錯暫存器／例外／SMC／TSO／憑證／DPAPI 測試、D3D12 與 D3D11↔D3D12 共用貼圖在 KosmicKrisp 上逐像素一致），Steam 也接上了。
 - 11/3 下午第一次用 Hadron 開遊戲：Xbox 自動登入，載入畫面沒有條紋，開遊戲到標題畫面約 9 分鐘。Free Flight 選 A330-200、桃園 RCTP 05R，按「開始飛行」不到兩分鐘進到駕駛艙，畫面正常、儀表在走，停在跑道上約 30 FPS（主選單約 60 FPS）。從主選單 Quit to Desktop 正常結束。整輪都是背景模式，見下面「背景模式」。
 - 11/4 第一架官網版外掛：TFDi MD-11（Install Manager 是 WPF 程式）。它在 Wine 裡一勾模擬器就卡死，原因是 winemac 的主執行緒在更新 OpenGL 時排隊等它自己，上游 Wine 也還沒修，我們加了 Wine patch 0060 修掉。之後用 Wine 內建的 Wine Mono 就能裝完，不用另外裝 .NET Framework。MD-11F 在台北松山 RCSS 進得了駕駛艙，PFD、ND、EICAS、MCDU 都正常，停在跑道上約 15 FPS（同一台機器 A330 約 30 FPS）。
+- 11/4 下午：fork 出來的 app 改名 Squark（app 名稱、資料夾、Steam 裡的工具名稱），GitHub 是 [`jason5545/squark-app`](https://github.com/jason5545/squark-app)。FEX patch 0035–0038（FBW A380 基準快 5.5%）裝進遊戲用的 runtime 和 prefix，MD-11 在遊戲裡的 FPS 還沒量。
 
 ![TFDi MD-11F 在 RCSS 跑道頭的駕駛艙，PFD、ND、EICAS、MCDU 都有畫面](docs/img/md11-rcss-cockpit.jpg)
 
@@ -22,9 +23,9 @@
 | 項目 | 版本 |
 |---|---|
 | Mac | M5 Max（40 核 GPU）、128 GB、macOS 27.2 |
-| Hadron | fork [`jason5545/Hadron`](https://github.com/jason5545/Hadron) 分支 `steamac`（上游 `87c4265` 加我們的改動），Hadron 1.0.3，Sparkle 自動更新關掉 |
+| Squark（app） | [`jason5545/squark-app`](https://github.com/jason5545/squark-app) 分支 `steamac`：Hadron 上游 `87c4265` 加我們的改動，11/4 從 Hadron 改名。Squark 1.0.3，Sparkle 自動更新關掉 |
 | Wine runtime | `wine-11.18-fex`：WineHQ 11.18，加 Hadron 的 patch 0001–0003、0005，Highball `patches-arm64` 0018–0052（highball-engine `2eedc50`），我們的 0004、0053–0060；runtime 帶 Homebrew 的 sdl2-compat＋SDL3，winebus 走 SDL（照 Highball） |
-| FEX | FEX-2610 加 Highball `fex/patches` 0001–0033，unix 端是 Highball 的 `fexunixlib_darwin.cpp`（每條執行緒都開硬體 TSO）。我們的 0035–0038（以 FBW A380 基準最佳化，說明在 fork 的 `runtime/fex/highball/README.md`）11/4 編進 fork 的 runtime，還沒裝進遊戲用的 runtime 和遊戲 prefix |
+| FEX | FEX-2610 加 Highball `fex/patches` 0001–0033，unix 端是 Highball 的 `fexunixlib_darwin.cpp`（每條執行緒都開硬體 TSO）。我們的 0035–0038（以 FBW A380 基準最佳化，說明在 fork 的 `runtime/fex/highball/README.md`）11/4 裝進遊戲用的 runtime 和遊戲 prefix；0037 由 MSFS 配方對 `\wasm\msfs2024\` 開 |
 | 圖形 | KosmicKrisp（Mesa `ce576c29ed` 加 fxgl/steamac v1.9.7 的 0001–0077，再加 [`patches/kk/`](patches/kk/)）；vkd3d-proton `21a49c97`（v3.0b）、DXVK `3cb664e1`（v2.6.2-23）加 [`patches/vkd3d-proton/`](patches/vkd3d-proton/)、[`patches/dxvk/`](patches/dxvk/)，編成 ARM64EC |
 | 其他 | GStreamer 1.28.7（官方 framework，用 Highball 的腳本精簡；沒有它開始畫面會一直黑） |
 | MSFS 2024 | Steam AppID 2537590，1.9.21.0 |
@@ -49,13 +50,13 @@ Wine 的 loader 是 runtime 裡的 `Wine.app`，要有 Cross-architecture Compat
 
 ## 圖形與啟動選項
 
-遊戲的 Hadron 面板「圖形」選「vkd3d-proton + KosmicKrisp」（`HADRON_GRAPHICS=vkd3d`）：覆蓋層 `lib/graphics/vkd3d`＋`lib/graphics/dxvk` 排在 Wine 自己的 DLL 前面，Vulkan 走 KosmicKrisp，並設 `VKD3D_FEATURE_LEVEL=12_1`、`VKD3D_SHADER_MODEL=6_7`、`DXVK_CONFIG`。只有 arm64（FEX）runtime 有這個選項。MSFS 現在的 Steam 啟動選項還是 NotProton 時期的寫法，`compat_run.sh` 會對應成 Hadron 的名稱：
+遊戲的 Squark 面板「圖形」選「vkd3d-proton + KosmicKrisp」（`HADRON_GRAPHICS=vkd3d`）：覆蓋層 `lib/graphics/vkd3d`＋`lib/graphics/dxvk` 排在 Wine 自己的 DLL 前面，Vulkan 走 KosmicKrisp，並設 `VKD3D_FEATURE_LEVEL=12_1`、`VKD3D_SHADER_MODEL=6_7`、`DXVK_CONFIG`。只有 arm64（FEX）runtime 有這個選項。MSFS 現在的 Steam 啟動選項還是 NotProton 時期的寫法，`compat_run.sh` 會對應成 `HADRON_*` 的名稱（改名成 Squark 之後，這些變數名稱照舊）：
 
 ```
 CX_GRAPHICS_BACKEND=vkd3d NOTPROTON_ENV_JSC_useJIT=false %command%
 ```
 
-`CX_GRAPHICS_BACKEND` 對應 `HADRON_GRAPHICS`，`NOTPROTON_ENV_<名稱>` 對應 `HADRON_ENV_<名稱>`（已經有 Hadron 名稱的優先）。MSFS（2537590）在 arm64 runtime 上自動帶 Highball 的 MSFS SMC 設定（`HB_FEX_SMC_RETIRE=1 HB_FEX_SMC_SKIP_SAME=1 HB_FEX_SMC_HOT_MAXINST=64 HB_FEX_VM_FASTPATH=1 HB_FEX_SMC_DEFER_CALLRET=1`），啟動選項有設的優先。
+`CX_GRAPHICS_BACKEND` 對應 `HADRON_GRAPHICS`，`NOTPROTON_ENV_<名稱>` 對應 `HADRON_ENV_<名稱>`（已經有 Hadron 名稱的優先）。MSFS（2537590）在 arm64 runtime 上自動帶 Highball 的 MSFS SMC 設定（`HB_FEX_SMC_RETIRE=1 HB_FEX_SMC_SKIP_SAME=1 HB_FEX_SMC_HOT_MAXINST=64 HB_FEX_VM_FASTPATH=1 HB_FEX_SMC_DEFER_CALLRET=1`），以及 `SQUARK_FEX_ABI_FLAGS=\wasm\msfs2024\`（FEX 0037，只作用在遊戲為飛機和儀表編出來的 WebAssembly 模組），啟動選項有設的優先。
 
 DXVK 和 vkd3d-proton 跟遊戲在同一個行程裡。編成 ARM64EC 之後遊戲照樣當 x64 DLL 載入，裡面的程式碼直接跑原生 ARM64，D3D 轉 Vulkan 這一步不用再跟遊戲一起在 FEX 裡模擬。離線測試（`tools/d3d-bench/`）：D3D12 錄每次 draw 的時間少約 7–16%，第一次建 PSO 快很多（8 條執行緒同時建 96 個：x64 0.6–1 秒、ARM64EC 0.03 秒）；代價是每次呼叫都要跨一次 x64／ARM64EC 的邊界，D3D11 這種一次只做一點事的呼叫反而慢（約 50 → 190 ns）。11/3 遊戲在 Hadron 上用的就是 ARM64EC 這組，主選單和駕駛艙都畫得正常；跟 x64 版在遊戲裡的 FPS 還沒比過。
 
@@ -64,7 +65,7 @@ DXVK 和 vkd3d-proton 跟遊戲在同一個行程裡。編成 ARM64EC 之後遊�
 開遊戲測試時，遊戲畫面不能出現在使用者的螢幕上，也不能搶走鍵盤焦點，因為使用者同時在用這台 Mac。做法分三層：
 
 - **Wine（0056）**：`HADRON_MAC_BACKGROUND=1` 時，視窗一建立就放在最低的視窗層（桌面圖層底下），還在螢幕上，所以照常畫、`screencapture -l` 截得到；程式永遠不自己啟用、不取消隱藏，不動、不鎖主機游標，不改解析度，按鍵不經 macOS 輸入法。
-- **Hadron `compat_run.sh`**：啟動選項 `HADRON_MAC_BACKGROUND=1`，或一次性請求檔 `~/Library/Application Support/hadron/background/<AppID>`（10 分鐘內有效）。設好之後才跑任何 Wine 程序（prefix 更新的 wineboot 也藏住），`open -g` 啟動、不開 Hadron 的啟動視窗。Steam 開遊戲之前會先跑一次安裝腳本（`iscriptevaluator.exe`，verb `run`），那次也走背景，但請求留給遊戲本身那次（`waitforexitandrun`）拿；11/3 第一次試的時候請求被安裝腳本先用掉，遊戲變成正常模式出現在畫面上（fork `56dcd8b` 修掉）。
+- **Squark `compat_run.sh`**：啟動選項 `HADRON_MAC_BACKGROUND=1`，或一次性請求檔 `~/Library/Application Support/squark/background/<AppID>`（10 分鐘內有效）。設好之後才跑任何 Wine 程序（prefix 更新的 wineboot 也藏住），`open -g` 啟動、不開 Squark 的啟動視窗。Steam 開遊戲之前會先跑一次安裝腳本（`iscriptevaluator.exe`，verb `run`），那次也走背景，但請求留給遊戲本身那次（`waitforexitandrun`）拿；11/3 第一次試的時候請求被安裝腳本先用掉，遊戲變成正常模式出現在畫面上（fork `56dcd8b` 修掉）。
 - **輸入**：從 Wine 內部送硬體輸入（一支小的 Windows 程式加入遊戲的 wineserver，透過 win32u 的 `SendHardwareInput` 送，跟 winemac 轉送 Mac 輸入走同一條路），不動 Mac 的游標和前景。MSFS 的按鈕要先 hover，移動兩次再點就按得到；搜尋框打字也收得到。監看程式每 30 ms 檢查遊戲和 Steam 的視窗，有視窗跑到桌面之上就立刻藏起來、搶走前景就還回去。這部分工具只放本機，不在 repo 裡。
 
 11/3 一整輪（開遊戲、登入、主選單、Free Flight、進駕駛艙、退出）遊戲視窗 0 次出現在畫面上、0 次搶前景。

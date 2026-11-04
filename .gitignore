@@ -7,6 +7,7 @@
 
 # 建置產物
 tools/*/build/
+tools/*/obj/
 tools/*/out/
 *.o
 *.obj

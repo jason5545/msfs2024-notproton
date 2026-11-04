@@ -8,11 +8,14 @@
 
 名字是 squawk（應答機代碼）加 quark（夸克，組成 hadron 的粒子）；squark 也是超對稱理論裡夸克的夥伴粒子。這個 repo 11/3 從 `msfs2024-notproton` 改名；11/3 中午之前走的是 NotProton（CrossOver 27 Preview 的 Wine）路線，那段的 patch 和工具留在這裡當紀錄。
 
-## 現況（2026/11/3）
+## 現況（2026/11/4）
 
 - NotProton 路線（到 11/3 中午）：從開機走到 Xbox 自動登入、世界地圖，按「開始飛行」進到機場，駕駛艙畫面正常，停在跑道上約 16 FPS。還沒起飛。
 - 換到 Hadron 之後：runtime 編好、整套回歸測試過了（Hadron 自己的 `check-runtime.sh` 8 項、Highball 的 x64 忠實度測試數字跟它的 README 一致、我們的除錯暫存器／例外／SMC／TSO／憑證／DPAPI 測試、D3D12 與 D3D11↔D3D12 共用貼圖在 KosmicKrisp 上逐像素一致），Steam 也接上了。
 - 11/3 下午第一次用 Hadron 開遊戲：Xbox 自動登入，載入畫面沒有條紋，開遊戲到標題畫面約 9 分鐘。Free Flight 選 A330-200、桃園 RCTP 05R，按「開始飛行」不到兩分鐘進到駕駛艙，畫面正常、儀表在走，停在跑道上約 30 FPS（主選單約 60 FPS）。從主選單 Quit to Desktop 正常結束。整輪都是背景模式，見下面「背景模式」。
+- 11/4 第一架官網版外掛：TFDi MD-11（Install Manager 是 WPF 程式）。它在 Wine 裡一勾模擬器就卡死，原因是 winemac 的主執行緒在更新 OpenGL 時排隊等它自己，上游 Wine 也還沒修，我們加了 Wine patch 0060 修掉。之後用 Wine 內建的 Wine Mono 就能裝完，不用另外裝 .NET Framework。MD-11F 在台北松山 RCSS 進得了駕駛艙，PFD、ND、EICAS、MCDU 都正常，停在跑道上約 15 FPS（同一台機器 A330 約 30 FPS）。
+
+![TFDi MD-11F 在 RCSS 跑道頭的駕駛艙，PFD、ND、EICAS、MCDU 都有畫面](docs/img/md11-rcss-cockpit.jpg)
 
 ## 環境
 

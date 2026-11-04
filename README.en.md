@@ -8,11 +8,14 @@ Everything is built from open source, and the game files are never touched.
 
 The name is squawk (a transponder code) plus quark (what hadrons are made of); a squark is also the quark's partner particle in supersymmetry. This repo was renamed from `msfs2024-notproton` on Nov 3. Until midday Nov 3 the work went through NotProton (CrossOver 27 Preview's Wine); the patches and tools from that period stay here as a record.
 
-## Status (2026-11-03)
+## Status (2026-11-04)
 
 - NotProton route (until midday Nov 3): the game ran from start through automatic Xbox sign-in and the world map; after pressing "Fly" it reached the airport with a correctly rendered cockpit, sitting on the runway at about 16 FPS. No actual flight yet.
 - After the switch to Hadron: the runtime is built and passes the full regression set (Hadron's own `check-runtime.sh`, 8 checks; Highball's x64-fidelity tests with the numbers its README lists; our debug-register, exception, SMC, TSO, credential and DPAPI tests; D3D12 and D3D11↔D3D12 shared textures on KosmicKrisp, pixel-identical), and Steam is hooked up.
 - First launch on Hadron, the afternoon of Nov 3: automatic Xbox sign-in, no stripes on the loading screen, about 9 minutes from launch to the title screen. Free Flight with the A330-200 at Taoyuan RCTP 05R: "Start flight" reached the cockpit in under two minutes, rendered correctly with the instruments running, at about 30 FPS on the runway (about 60 FPS in the main menu). Quit to Desktop from the main menu ended it cleanly. The whole run was in background mode, see "Background mode" below.
+- Nov 4, the first add-on bought from a developer's own store: the TFDi MD-11 (its Install Manager is a WPF program). In Wine it froze as soon as a simulator was ticked: winemac's main thread queued an OpenGL update and then waited for itself. Upstream Wine still has this, so we fixed it with Wine patch 0060. After that the installer ran to the end on Wine's own Wine Mono, no .NET Framework needed. The MD-11F loads into the cockpit at Taipei Songshan RCSS with the PFD, ND, EICAS and MCDU all working, at about 15 FPS on the runway (the A330 does about 30 FPS on the same Mac).
+
+![TFDi MD-11F cockpit on the runway at RCSS, with the PFD, ND, EICAS and MCDU rendering](docs/img/md11-rcss-cockpit.jpg)
 
 ## Environment
 

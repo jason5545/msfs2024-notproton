@@ -13,8 +13,8 @@
 # HADRON_ARM64EC_GRAPHICS leaves that part out.
 set -eu
 MSFS_SRC="${MSFS_SRC:-$HOME/GitHub/msfs-src}"
-HADRON="${HADRON:-$MSFS_SRC/forks/Hadron-steamac}"
+HADRON="${HADRON:-$HOME/GitHub/squark-app}"
 export WINE_BUNDLE_ID="${WINE_BUNDLE_ID:-io.github.jason5545.hadron.wine}"
 export HADRON_KOSMICKRISP="${HADRON_KOSMICKRISP-$MSFS_SRC/kk/stage-rel}"
-export HADRON_ARM64EC_GRAPHICS="${HADRON_ARM64EC_GRAPHICS-vkd3d:$MSFS_SRC/d3d-build/vkd3d-ec/arm64ec:$MSFS_SRC/forks/vkd3d-proton-steamac/LICENSE dxvk:$MSFS_SRC/d3d-build/dxvk-ec/arm64ec:$MSFS_SRC/forks/dxvk-steamac/LICENSE}"
+export HADRON_ARM64EC_GRAPHICS="${HADRON_ARM64EC_GRAPHICS-vkd3d:$MSFS_SRC/d3d-build/vkd3d-ec/arm64ec:$HOME/GitHub/vkd3d-proton-steamac/LICENSE dxvk:$MSFS_SRC/d3d-build/dxvk-ec/arm64ec:$HOME/GitHub/dxvk-steamac/LICENSE}"
 exec "$HADRON/runtime/build-wine.sh" "${1:-wine-11.18-fex}"

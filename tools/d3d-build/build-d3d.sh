@@ -1,5 +1,5 @@
 #!/bin/bash
-# build-d3d.sh <dxvk|vkd3d> <name> — cross-builds the DXVK or vkd3d-proton fork ($FORKS/*-steamac, default ~/GitHub/msfs-src/forks; whatever is checked
+# build-d3d.sh <dxvk|vkd3d> <name> — cross-builds the DXVK or vkd3d-proton fork ($FORKS/*-steamac, default ~/GitHub; whatever is checked
 # out there) with meson, release, stripped, the way their package-release.sh does.
 #   ARCH=x64 (default)  Windows x86-64 with brew's mingw-w64 (gcc). In the game these run inside FEX with the game.
 #   ARCH=arm64ec        ARM64EC with llvm-mingw ($LLVM_MINGW, default ~/GitHub/msfs-src/dl/llvm-mingw/...20261020...)
@@ -9,7 +9,7 @@
 # Runs under nice with JOBS (default 6) jobs. Reconfigures only if the build tree is missing.
 set -euo pipefail
 WHAT=$1; NAME=$2
-FORKS=${FORKS:-$HOME/GitHub/msfs-src/forks}
+FORKS=${FORKS:-$HOME/GitHub}
 OUT=$HOME/GitHub/msfs-src/d3d-build/$NAME
 ARCH=${ARCH:-x64}
 case $ARCH in

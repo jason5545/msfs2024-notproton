@@ -18,7 +18,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 SRC = os.path.expanduser("~/GitHub/msfs-src")
-RT = sys.argv[1] if len(sys.argv) > 1 else f"{SRC}/forks/Hadron-steamac/out/runtime/wine-11.18-fex"
+RT = sys.argv[1] if len(sys.argv) > 1 else os.path.expanduser("~/GitHub/squark-app/out/runtime/wine-11.18-fex")
 PFX = sys.argv[2] if len(sys.argv) > 2 else f"{SRC}/hadron-test/pfx-sdl"
 OUT = sys.argv[3] if len(sys.argv) > 3 else f"{REPO}/records/data/hadron/fakepad-{time.strftime('%m%d-%H%M')}"
 

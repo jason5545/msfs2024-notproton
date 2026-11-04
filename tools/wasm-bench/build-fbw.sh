@@ -19,7 +19,7 @@ LLVM=/opt/homebrew/opt/llvm/bin
 WABT=$(brew --prefix wabt)
 RT=$WABT/share/wabt/wasm2c
 [ -f "$RT/wasm-rt-impl.c" ] || RT=$(dirname "$(find "$WABT/" -name wasm-rt-impl.c | head -1)")
-MINGW=${MINGW:-$MSFS_SRC/forks/Hadron-steamac/scratch/downloads/llvm-mingw-20261006-ucrt-macos-universal}
+MINGW=${MINGW:-$HOME/GitHub/squark-app/scratch/downloads/llvm-mingw-20261006-ucrt-macos-universal}
 
 C=$MSFS_SRC/fbw-bench
 mkdir -p "$C/src"

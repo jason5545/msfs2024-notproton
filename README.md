@@ -24,7 +24,7 @@
 | Mac | M5 Max（40 核 GPU）、128 GB、macOS 27.2 |
 | Hadron | fork [`jason5545/Hadron`](https://github.com/jason5545/Hadron) 分支 `steamac`（上游 `87c4265` 加我們的改動），Hadron 1.0.3，Sparkle 自動更新關掉 |
 | Wine runtime | `wine-11.18-fex`：WineHQ 11.18，加 Hadron 的 patch 0001–0003、0005，Highball `patches-arm64` 0018–0052（highball-engine `2eedc50`），我們的 0004、0053–0060；runtime 帶 Homebrew 的 sdl2-compat＋SDL3，winebus 走 SDL（照 Highball） |
-| FEX | FEX-2610 加 Highball `fex/patches` 0001–0033，unix 端是 Highball 的 `fexunixlib_darwin.cpp`（每條執行緒都開硬體 TSO） |
+| FEX | FEX-2610 加 Highball `fex/patches` 0001–0033，unix 端是 Highball 的 `fexunixlib_darwin.cpp`（每條執行緒都開硬體 TSO）。我們的 0035–0038（以 FBW A380 基準最佳化，說明在 fork 的 `runtime/fex/highball/README.md`）11/4 編進 fork 的 runtime，還沒裝進遊戲用的 runtime 和遊戲 prefix |
 | 圖形 | KosmicKrisp（Mesa `ce576c29ed` 加 fxgl/steamac v1.9.7 的 0001–0077，再加 [`patches/kk/`](patches/kk/)）；vkd3d-proton `21a49c97`（v3.0b）、DXVK `3cb664e1`（v2.6.2-23）加 [`patches/vkd3d-proton/`](patches/vkd3d-proton/)、[`patches/dxvk/`](patches/dxvk/)，編成 ARM64EC |
 | 其他 | GStreamer 1.28.7（官方 framework，用 Highball 的腳本精簡；沒有它開始畫面會一直黑） |
 | MSFS 2024 | Steam AppID 2537590，1.9.21.0 |
@@ -138,7 +138,7 @@ DXVK 和 vkd3d-proton 跟遊戲在同一個行程裡。編成 ARM64EC 之後遊�
 | `tools/tls-server-test/` | Wine 裡的 .NET HTTPS 伺服器：自產憑證或載入 PFX（各種金鑰儲存方式）當 TLS 伺服器，重現 0057、0058 |
 | `tools/clrstack/` | 用 ClrMD 印出執行中 .NET Framework 程式每條執行緒的堆疊（在 Wine 裡跟目標同一個 runner、prefix 跑），找到 0060 的死結 |
 | `tools/padprobe/` | 手把：`padprobe` 在 Wine 裡讀 XInput，`macpad`、`sdlpad` 在 Mac 端讀實體手把，`fakepad.py` 驅動 0059 的模擬手把 |
-| `tools/wasm-bench/` | WASM 航電基準：C 或 Rust → wasm32 → wasm2c → x64（跟 MSFS 把 WASM 編成 x64 dll 同一型），另編 Mac 原生當對照。`fbwbench` 是 FlyByWire A380X 的 Rust 系統模擬（GPL-3.0，原始碼另外 clone），`bigbench` 量大量程式碼，`fexstats.py` 讀 FEX 的執行緒統計 |
+| `tools/wasm-bench/` | WASM 航電基準：C 或 Rust → wasm32 → wasm2c → x64（跟 MSFS 把 WASM 編成 x64 dll 同一型），另編 Mac 原生當對照。`fbwbench` 是 FlyByWire A380X 的 Rust 系統模擬（GPL-3.0，原始碼另外 clone），`bigbench` 量大量程式碼，`fexstats.py` 讀 FEX 的執行緒統計。量 FEX 改動用 `bench2.sh`（暖機期差分，算每 tick 的指令數與週期，`proc_pid_rusage`）、`bench-time.sh`；看翻譯出來的程式碼用 `jitdump.sh`（lldb 只接測試程式）→ `jitimg.py` → `jitcat.py`／`jitann.py`；遊戲的 `sample` 用 `gameprof.py` 分模組；`leatest/` 是 LEA 正確性測試；`fexexp-build.sh`、`fexexp-swap.sh` 編 FEX、把 DLL 換進測試 runtime 和測試 prefix 的 system32 |
 | `tools/hb-fex/` | NotProton 時期（停用）：把 FEX DLL 換進測試用 runner 複本、跑回歸測試 |
 
 Wine 的 DLL 和測試程式用 llvm-mingw（含 arm64ec）編。

@@ -138,6 +138,7 @@ DXVK 和 vkd3d-proton 跟遊戲在同一個行程裡。編成 ARM64EC 之後遊�
 | `tools/tls-server-test/` | Wine 裡的 .NET HTTPS 伺服器：自產憑證或載入 PFX（各種金鑰儲存方式）當 TLS 伺服器，重現 0057、0058 |
 | `tools/clrstack/` | 用 ClrMD 印出執行中 .NET Framework 程式每條執行緒的堆疊（在 Wine 裡跟目標同一個 runner、prefix 跑），找到 0060 的死結 |
 | `tools/padprobe/` | 手把：`padprobe` 在 Wine 裡讀 XInput，`macpad`、`sdlpad` 在 Mac 端讀實體手把，`fakepad.py` 驅動 0059 的模擬手把 |
+| `tools/wasm-bench/` | WASM 航電基準：C 或 Rust → wasm32 → wasm2c → x64（跟 MSFS 把 WASM 編成 x64 dll 同一型），另編 Mac 原生當對照。`fbwbench` 是 FlyByWire A380X 的 Rust 系統模擬（GPL-3.0，原始碼另外 clone），`bigbench` 量大量程式碼，`fexstats.py` 讀 FEX 的執行緒統計 |
 | `tools/hb-fex/` | NotProton 時期（停用）：把 FEX DLL 換進測試用 runner 複本、跑回歸測試 |
 
 Wine 的 DLL 和測試程式用 llvm-mingw（含 arm64ec）編。

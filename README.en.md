@@ -23,7 +23,7 @@ The name is squawk (a transponder code) plus quark (what hadrons are made of); a
 |---|---|
 | Mac | M5 Max (40-core GPU), 128 GB, macOS 27.2 |
 | Hadron | fork [`jason5545/Hadron`](https://github.com/jason5545/Hadron), branch `steamac` (upstream `87c4265` plus our changes), Hadron 1.0.3, Sparkle auto-update off |
-| Wine runtime | `wine-11.18-fex`: WineHQ 11.18 with Hadron's patches 0001–0003 and 0005, Highball's `patches-arm64` 0018–0052 (highball-engine `2eedc50`), and our 0004 and 0053–0056 |
+| Wine runtime | `wine-11.18-fex`: WineHQ 11.18 with Hadron's patches 0001–0003 and 0005, Highball's `patches-arm64` 0018–0052 (highball-engine `2eedc50`), and our 0004 and 0053–0060; the runtime carries Homebrew's sdl2-compat and SDL3, and winebus goes through SDL (as Highball does) |
 | FEX | FEX-2610 with Highball's `fex/patches` 0001–0033; the unix side is Highball's `fexunixlib_darwin.cpp` (hardware TSO on every thread) |
 | Graphics | KosmicKrisp (Mesa `ce576c29ed` plus fxgl/steamac v1.9.7's 0001–0077, plus [`patches/kk/`](patches/kk/)); vkd3d-proton `21a49c97` (v3.0b) and DXVK `3cb664e1` (v2.6.2-23) plus [`patches/vkd3d-proton/`](patches/vkd3d-proton/) and [`patches/dxvk/`](patches/dxvk/), built for ARM64EC |
 | Other | GStreamer 1.28.7 (the official framework, trimmed with Highball's scripts; without it the start screen stays black) |
@@ -42,6 +42,10 @@ Wine's loader is the runtime's `Wine.app`. It needs the Cross-architecture Compa
 | 0054 | `HADRON_WINE_USER` names the Windows user. Wine's DPAPI mixes the user name into its keys, so data protected under CrossOver as `crossover` (the Xbox sign-in) only opens under the same name; `compat_run.sh` sets it for a prefix NotProton left behind |
 | 0055 | `HADRON_VK_HOST_SHARING=1` hides `VK_KHR_external_memory_win32`. Highball 0036 provides it through Metal objects, and with it our DXVK and vkd3d-proton skip the host-memory sharing they were validated with, so D3D11↔D3D12 shared textures fail; set automatically for our graphics layer |
 | 0056 | `HADRON_MAC_BACKGROUND=1`, a background mode for automated tests: windows sit under the desktop picture (invisible, yet they keep drawing and can be captured), the program never takes the foreground, leaves the host cursor and display modes alone and skips the macOS input method; input comes only from inside Wine |
+| 0057 | crypt32's `PFXImportCertStore` gives the private key only to the certificate whose public key matches. Wine gave it to every certificate in the PFX, so when .NET deleted the ones it did not keep, it deleted the shared key container and the kept server certificate lost its key (hit by MSFS Map Enhancement's local HTTPS server). Not fixed upstream yet |
+| 0058 | schannel also looks under HKLM for a server certificate's CAPI private key when HKCU has none (.NET's `MachineKeySet`) |
+| 0059 | `SQUARK_FAKEPAD=<FIFO path>` (or a `squark-fakepad` FIFO in the prefix) adds a virtual gamepad (045e:02fd) on winebus's SDL bus, driven by text commands through the FIFO. For testing input without a controller and for background automation |
+| 0060 | winemac's `OnMainThread` runs the block directly when already on the main thread. Updating an OpenGL context in `viewWillDraw`, the main thread queued work and waited for itself, hanging the whole program (the TFDi MD-11 Install Manager: WPF on d3d9→wined3d OpenGL). Upstream master is the same |
 
 ## Graphics and launch options
 
@@ -131,6 +135,10 @@ These were used only on the NotProton route and stay as a record:
 | `tools/tso-bench/` | Correctness and cost of x86 memory ordering (software vs hardware TSO) |
 | `tools/share-test/` | D3D11↔D3D12 shared textures, Media Foundation video decoding and `msvproc` output |
 | `tools/np-gfx/` | Basic Vulkan and D3D12 tests |
+| `tools/tls-server-test/` | .NET HTTPS server under Wine: serves TLS with a self-made certificate or a PFX loaded in each key-storage mode; reproduces 0057 and 0058 |
+| `tools/clrstack/` | Prints every thread's stack of a running .NET Framework program with ClrMD (run under Wine with the target's runner and prefix); found the 0060 deadlock |
+| `tools/padprobe/` | Gamepads: `padprobe` reads XInput inside Wine, `macpad` and `sdlpad` read a physical pad on the Mac side, `fakepad.py` drives 0059's virtual pad |
+| `tools/hb-fex/` | NotProton era (retired): swaps a FEX DLL into a test runner copy and runs the regression set |
 
 Wine DLLs and the test programs are built with llvm-mingw (with arm64ec).
 

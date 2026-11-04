@@ -23,7 +23,7 @@
 |---|---|
 | Mac | M5 Max（40 核 GPU）、128 GB、macOS 27.2 |
 | Hadron | fork [`jason5545/Hadron`](https://github.com/jason5545/Hadron) 分支 `steamac`（上游 `87c4265` 加我們的改動），Hadron 1.0.3，Sparkle 自動更新關掉 |
-| Wine runtime | `wine-11.18-fex`：WineHQ 11.18，加 Hadron 的 patch 0001–0003、0005，Highball `patches-arm64` 0018–0052（highball-engine `2eedc50`），我們的 0004、0053–0056 |
+| Wine runtime | `wine-11.18-fex`：WineHQ 11.18，加 Hadron 的 patch 0001–0003、0005，Highball `patches-arm64` 0018–0052（highball-engine `2eedc50`），我們的 0004、0053–0060；runtime 帶 Homebrew 的 sdl2-compat＋SDL3，winebus 走 SDL（照 Highball） |
 | FEX | FEX-2610 加 Highball `fex/patches` 0001–0033，unix 端是 Highball 的 `fexunixlib_darwin.cpp`（每條執行緒都開硬體 TSO） |
 | 圖形 | KosmicKrisp（Mesa `ce576c29ed` 加 fxgl/steamac v1.9.7 的 0001–0077，再加 [`patches/kk/`](patches/kk/)）；vkd3d-proton `21a49c97`（v3.0b）、DXVK `3cb664e1`（v2.6.2-23）加 [`patches/vkd3d-proton/`](patches/vkd3d-proton/)、[`patches/dxvk/`](patches/dxvk/)，編成 ARM64EC |
 | 其他 | GStreamer 1.28.7（官方 framework，用 Highball 的腳本精簡；沒有它開始畫面會一直黑） |
@@ -42,6 +42,10 @@ Wine 的 loader 是 runtime 裡的 `Wine.app`，要有 Cross-architecture Compat
 | 0054 | `HADRON_WINE_USER` 指定 Windows 使用者名稱。Wine 的 DPAPI 把使用者名稱混進金鑰，CrossOver 時代以 `crossover` 加密的資料（Xbox 登入）要同一個名字才解得開；NotProton 留下的 prefix 由 `compat_run.sh` 自動設 |
 | 0055 | `HADRON_VK_HOST_SHARING=1` 不給程式 `VK_KHR_external_memory_win32`。Highball 0036 透過 Metal 物件提供它，我們的 DXVK／vkd3d-proton 看到它就不走驗證過的宿主記憶體共用，D3D11↔D3D12 共用貼圖會失敗；選我們的圖形層時自動設 |
 | 0056 | `HADRON_MAC_BACKGROUND=1` 背景模式，給自動化測試用：視窗放在桌面圖層底下（畫面上看不到，但照常畫、截得到）、永遠不搶前景、不動主機游標和解析度、不經 macOS 輸入法，輸入只從 Wine 內部送 |
+| 0057 | crypt32 `PFXImportCertStore` 只把私鑰掛給公鑰相符的那張憑證。Wine 原本掛給 PFX 裡每一張，.NET 刪掉不要的憑證時連共用的金鑰容器一起刪，留下的伺服器憑證就沒有私鑰（MSFS Map Enhancement 的本機 HTTPS 伺服器踩到）。上游還沒修 |
+| 0058 | schannel 找伺服器憑證的 CAPI 私鑰時，HKCU 找不到再找 HKLM（.NET 的 `MachineKeySet`） |
+| 0059 | `SQUARK_FAKEPAD=<FIFO 路徑>`（或 prefix 裡有 `squark-fakepad` 這個 FIFO）時，winebus 的 SDL 匯流排多掛一支模擬手把（045e:02fd），從 FIFO 讀文字指令。沒有實體手把時測試輸入、背景操作用 |
+| 0060 | winemac 的 `OnMainThread` 在主執行緒上就直接執行。主執行緒在 `viewWillDraw` 更新 OpenGL context 時排隊等自己，整個程式卡死（TFDi MD-11 的 Install Manager，WPF 走 d3d9→wined3d OpenGL）。上游 master 還是一樣 |
 
 ## 圖形與啟動選項
 
@@ -131,6 +135,10 @@ DXVK 和 vkd3d-proton 跟遊戲在同一個行程裡。編成 ARM64EC 之後遊�
 | `tools/tso-bench/` | x86 記憶體順序（軟體與硬體 TSO）的正確性與成本 |
 | `tools/share-test/` | D3D11↔D3D12 共用貼圖、Media Foundation 影片解碼與 `msvproc` 輸出 |
 | `tools/np-gfx/` | Vulkan 與 D3D12 基本測試 |
+| `tools/tls-server-test/` | Wine 裡的 .NET HTTPS 伺服器：自產憑證或載入 PFX（各種金鑰儲存方式）當 TLS 伺服器，重現 0057、0058 |
+| `tools/clrstack/` | 用 ClrMD 印出執行中 .NET Framework 程式每條執行緒的堆疊（在 Wine 裡跟目標同一個 runner、prefix 跑），找到 0060 的死結 |
+| `tools/padprobe/` | 手把：`padprobe` 在 Wine 裡讀 XInput，`macpad`、`sdlpad` 在 Mac 端讀實體手把，`fakepad.py` 驅動 0059 的模擬手把 |
+| `tools/hb-fex/` | NotProton 時期（停用）：把 FEX DLL 換進測試用 runner 複本、跑回歸測試 |
 
 Wine 的 DLL 和測試程式用 llvm-mingw（含 arm64ec）編。
 

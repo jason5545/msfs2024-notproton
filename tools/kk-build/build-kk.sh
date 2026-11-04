@@ -17,6 +17,7 @@
 # Same meson options as steamac's build.sh: clc tools with Homebrew LLVM (shared) + SPIRV-LLVM-Translator;
 # the driver release, -Db_ndebug=true, -Dllvm=disabled -Dmesa-clc=system, --prefer-static,
 # MACOSX_DEPLOYMENT_TARGET=26.0, install_name @rpath/libvulkan_kosmickrisp.dylib, ad-hoc signed.
+# Ours: -Dshader-cache-max-size (CACHE_MAX below).
 # Skipped from steamac's script: host/moltenvk/repro (needs the steamac MoltenVK build); the probe is
 # compiled against Homebrew's vulkan headers instead of MoltenVK's.
 set -eu
@@ -28,6 +29,10 @@ clc=$work/clc
 steamac=$KK/steamac-197
 NAME=${KK_NAME:-dev}
 JOBS=${JOBS:-8}
+# Default size limit of Mesa's on-disk shader cache (~/.cache/mesa_shader_cache), built in as
+# MESA_SHADER_CACHE_MAX_SIZE; the environment variable still overrides it. Mesa's own default is 1 GB, which
+# MSFS 2024 filled (11/4); the cache is LRU, so a larger limit only costs disk the games actually use.
+CACHE_MAX=${KK_SHADER_CACHE_MAX_SIZE:-8G}
 python=$(command -v python3.14 || command -v python3.13 || command -v python3.12)
 
 prepare() {
@@ -68,7 +73,12 @@ setup_driver() {
 		-Dplatforms=macos -Dvulkan-drivers=kosmickrisp -Dgallium-drivers= -Dopengl=false \
 		-Dglx=disabled -Degl=disabled -Dgbm=disabled -Dzstd=disabled -Dexpat=disabled \
 		-Dllvm=disabled -Dspirv-tools=disabled -Dmesa-clc=system -Dprecomp-compiler=enabled \
-		--prefer-static > "$work/driver-setup.log"
+		-Dshader-cache-max-size="$CACHE_MAX" --prefer-static > "$work/driver-setup.log"
+}
+
+# Keep an existing build's options in step with this script (meson only rebuilds what they change).
+sync_driver_options() {
+	PATH="$clc/bin:$work/venv/bin:$PATH" meson configure "$work/build" -Dshader-cache-max-size="$CACHE_MAX" > /dev/null
 }
 
 build_driver() {
@@ -105,6 +115,7 @@ stage() {
 		echo "mesa:     $MESA_COMMIT + fxgl/steamac v1.9.7 host/kosmickrisp/patches (rev $(cat "$steamac"/kosmickrisp/patches/*.patch | shasum -a 256 | cut -c1-8))"
 		echo "extra:    $(git -C "$src" status --porcelain | wc -l | tr -d ' ') changed paths vs MESA_COMMIT"
 		echo "driver:   $(sed -n 's/^driver: *//p' "$stage/probe.txt")"
+		echo "cache:    shader-cache-max-size $CACHE_MAX"
 		echo "Xcode:    $(xcodebuild -version | tr '\n' ' ')"
 		echo "built:    $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 		echo "sha256:   $(shasum -a 256 "$staged" | cut -d' ' -f1)"
@@ -116,6 +127,6 @@ cmd=${1:-build}; [ $# -gt 0 ] && shift
 case $cmd in
 	prepare) prepare "$@" ;;
 	build) venv; build_clc; setup_driver; build_driver; util_test; stage ;;
-	driver) [ -f "$work/build/build.ninja" ] || setup_driver; build_driver; stage ;;
+	driver) if [ -f "$work/build/build.ninja" ]; then sync_driver_options; else setup_driver; fi; build_driver; stage ;;
 	*) echo "usage: $0 prepare [patches…] | build | driver" >&2; exit 2 ;;
 esac

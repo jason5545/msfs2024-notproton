@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: jason chien <3936511+jason5545@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 20:04:57 +0800
+Subject: [PATCH 08/11] kk: compressed images do not ask for shader write
+
+From Highball (highball-engine, kosmickrisp-arm64/highball/0003-compressed-texture-usage.patch at
+34bd3b0, 2026-11-04), written there with an LLM's help. Unchanged.
+
+Highball's README: compressed images do not ask for shader write, which corrupted sparse BC textures.
+
+Applies after 0007.
+---
+ src/kosmickrisp/vulkan/kk_image_layout.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/src/kosmickrisp/vulkan/kk_image_layout.c b/src/kosmickrisp/vulkan/kk_image_layout.c
+index f4f26e11c9f..859a6660e5d 100644
+--- a/src/kosmickrisp/vulkan/kk_image_layout.c
++++ b/src/kosmickrisp/vulkan/kk_image_layout.c
+@@ -234,6 +234,8 @@ kk_image_layout_init(const struct kk_device *dev, const struct vk_image *image,
+       pdev, image->usage, image->tiling, image->create_flags, format);
+    layout->usage = vk_image_usage_flags_to_mtl_texture_usage(
+       image->usage, image->create_flags, supported_format->atomic);
++   if (util_format_is_compressed(format))
++      layout->usage &= ~MTL_TEXTURE_USAGE_SHADER_WRITE;
+    layout->create_flags = image->create_flags;
+    layout->format.pipe = format;
+    layout->format.mtl = supported_format->mtl_pixel_format;
+-- 
+2.56.0
+

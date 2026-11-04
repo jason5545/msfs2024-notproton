@@ -16,7 +16,7 @@
 
 ## kk/
 
-套在 Mesa `ce576c29ed` 加 fxgl/steamac v1.9.7 的 KosmicKrisp patch 0001–0077 之後：`tools/kk-build/build-kk.sh prepare patches/kk/0001-… patches/kk/0002-… patches/kk/0003-… patches/kk/0004-… patches/kk/0005-…`（依序）。
+套在 Mesa `ce576c29ed` 加 fxgl/steamac v1.9.7 的 KosmicKrisp patch 0001–0077 之後：`tools/kk-build/build-kk.sh prepare $PWD/patches/kk/00*.patch`（0001–0011 依序，路徑要寫絕對路徑）。`build-kk.sh` 另外把 Mesa 磁碟 shader 快取的預設上限編成 8 GB（`-Dshader-cache-max-size`，Mesa 原本 1 GB，MSFS 11/4 塞滿過；環境變數 `MESA_SHADER_CACHE_MAX_SIZE` 照樣能蓋）。
 
 | 檔案 | 內容 |
 |---|---|
@@ -25,6 +25,8 @@
 | `0003-…keep-the-MSL…` | Metal 編譯失敗時把 MSL 和錯誤存到 `~/Library/Logs/kk-failed-msl/`（最多 200 份；0005 之後要設 `MESA_KK_DUMP_FAILED_MSL=1`） |
 | `0004-…PrimitiveShadingRateKHR…` | 拿掉 vertex shader 的 `PrimitiveShadingRateKHR` 輸出：dxil-spirv 看到 `SV_ShadingRate` 就會宣告，KK 沒有可變速率著色、MSL 也沒有這個輸出名稱，原本印成 `(null)` 編不過（MSFS 主選單 12 個 shader）。沒有 VRS 本來就是全速率著色 |
 | `0005-…only-on-request` | 除錯輸出預設關閉：steamac 0073 的 encoder 診斷原本在 Apple9 以上的 GPU 自動打開（M5 Max 每秒約 500 行，佔 Wine log 94%），改成要設 `MESA_KK_ENCODER_LOG=1`；0003 的 MSL 保存要設 `MESA_KK_DUMP_FAILED_MSL=1` |
+| `0006`–`0010` | Highball（highball-engine `kosmickrisp-arm64/highball/0001`–`0005`，`34bd3b0`）原樣搬來：sparse 資源可用 CPU 看得到的記憶體、產生的 MSL 壓縮並共用相同內容（Forza Horizon 6 的世界載入 19.5 GB → 4 GB）、壓縮貼圖不要求 shader 寫入、可寫 sparse 貼圖先排佇列分隔再對應、`HB_PRESENT_PACE_FPS` 平均送幀（預設不開）。0007 改 MSL 字串擁有權，steamac 0050–0077 和我們 0003 碰到這個字串的地方都核對過 |
+| `0011-…lighter-encoder-end-barriers…` | Highball 的 `0007`，兩處上下文手動放（`u_debug.h` include、`null_ubo` 釋放移到 `vk_pipeline_cache_destroy` 之前），程式碼是 Highball 的。**改預設**：encoder 結尾的 barrier 要 Device 可見性、不再用 ResourceAlias（Forza GPU 時間 −9%），除非 render encoder 跑過 occlusion query；`HB_KK_ALIAS_BARRIERS=1` 換回舊的。`HB_KK_NO_UBO_ROBUST=1` 預設不開。Highball 的 `0006`（磁碟快取）沒搬：steamac 0055 已經有，還多算了 GPU 家族、MSL 版本、workaround |
 
 Metal 只對「透過帶 `raster_order_group` 屬性的參數」做的存取保證順序；從普通位址轉型拿到的貼圖 handle 或結構成員，屬性不會生效（M5 Max 實測：N 個重疊片段各做一次讀出加一寫回，只有經過參數的才剛好等於 N）。
 

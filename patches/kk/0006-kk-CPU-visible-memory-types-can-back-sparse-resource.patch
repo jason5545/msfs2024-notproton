@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: jason chien <3936511+jason5545@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 20:04:57 +0800
+Subject: [PATCH 06/11] kk: CPU-visible memory types can back sparse resources
+
+From Highball (highball-engine, kosmickrisp-arm64/highball/0001-sparse-host-visible.patch at
+34bd3b0, 2026-11-04), written there with an LLM's help. Unchanged.
+
+Highball's README: CPU-visible memory types can back sparse resources.
+
+Applies after 0005.
+---
+ src/kosmickrisp/vulkan/kk_physical_device.c | 5 +----
+ 1 file changed, 1 insertion(+), 4 deletions(-)
+
+diff --git a/src/kosmickrisp/vulkan/kk_physical_device.c b/src/kosmickrisp/vulkan/kk_physical_device.c
+index f7494968b32..be21de9bcd6 100644
+--- a/src/kosmickrisp/vulkan/kk_physical_device.c
++++ b/src/kosmickrisp/vulkan/kk_physical_device.c
+@@ -1302,11 +1302,8 @@ kk_enumerate_physical_devices(struct vk_instance *_instance)
+    };
+    pdev->host_visible_mem_types = BITFIELD_BIT(host_visible_idx);
+ 
+-   /* Sparse resources map 64 KiB pages of placement heaps. Host-visible
+-    * memory may be a host pointer import (virglrenderer imports all of it),
+-    * which has no heap, so sparse resources only bind the device-local type. */
+    if (pdev->info.placement_sparse)
+-      pdev->sparse_mem_types = BITFIELD_BIT(0);
++      pdev->sparse_mem_types = BITFIELD_MASK(pdev->mem_type_count);
+ 
+    assert(pdev->mem_heap_count <= ARRAY_SIZE(pdev->mem_heaps));
+    assert(pdev->mem_type_count <= ARRAY_SIZE(pdev->mem_types));
+-- 
+2.56.0
+

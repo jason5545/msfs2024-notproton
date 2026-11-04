@@ -15,6 +15,7 @@
 - 11/3 下午第一次用 Hadron 開遊戲：Xbox 自動登入，載入畫面沒有條紋，開遊戲到標題畫面約 9 分鐘。Free Flight 選 A330-200、桃園 RCTP 05R，按「開始飛行」不到兩分鐘進到駕駛艙，畫面正常、儀表在走，停在跑道上約 30 FPS（主選單約 60 FPS）。從主選單 Quit to Desktop 正常結束。整輪都是背景模式，見下面「背景模式」。
 - 11/4 第一架官網版外掛：TFDi MD-11（Install Manager 是 WPF 程式）。它在 Wine 裡一勾模擬器就卡死，原因是 winemac 的主執行緒在更新 OpenGL 時排隊等它自己，上游 Wine 也還沒修，我們加了 Wine patch 0060 修掉。之後用 Wine 內建的 Wine Mono 就能裝完，不用另外裝 .NET Framework。MD-11F 在台北松山 RCSS 進得了駕駛艙，PFD、ND、EICAS、MCDU 都正常，停在跑道上約 15 FPS（同一台機器 A330 約 30 FPS）。
 - 11/4 下午：fork 出來的 app 改名 Squark（app 名稱、資料夾、Steam 裡的工具名稱），GitHub 是 [`jason5545/squark-app`](https://github.com/jason5545/squark-app)。FEX patch 0035–0038（FBW A380 基準快 5.5%）裝進遊戲用的 runtime 和 prefix，MD-11 在遊戲裡的 FPS 還沒量。
+- 11/4 傍晚：把 MD-11 的 WASM 拿到模擬器外面、用錄好的快照回放量 FEX。原本量到的「FEX 是原生的 3.1 倍」大半來自測試程式本身：wasm2c 編 Windows 版時每次函式呼叫都用 TLS 數呼叫深度（Mac 版沒有），MD-11 每幀約 84 萬次呼叫，這個計數器在 FEX 上變成一條串在記憶體上的相依鏈。不數深度的版本 FEX 只是原生的 1.41 倍（週期），比 A380 基準的 1.8 倍還低。MSFS 自己怎麼編 WASM 不知道（遊戲檔案不拆）。新的 FEX patch 0039 在 MD-11 回放上再省 6% 週期，還沒裝進遊戲。
 
 ![TFDi MD-11F 在 RCSS 跑道頭的駕駛艙，PFD、ND、EICAS、MCDU 都有畫面](docs/img/md11-rcss-cockpit.jpg)
 
@@ -25,7 +26,7 @@
 | Mac | M5 Max（40 核 GPU）、128 GB、macOS 27.2 |
 | Squark（app） | [`jason5545/squark-app`](https://github.com/jason5545/squark-app) 分支 `steamac`：Hadron 上游 `87c4265` 加我們的改動，11/4 從 Hadron 改名。Squark 1.0.3，Sparkle 自動更新關掉 |
 | Wine runtime | `wine-11.18-fex`：WineHQ 11.18，加 Hadron 的 patch 0001–0003、0005，Highball `patches-arm64` 0018–0052（highball-engine `2eedc50`），我們的 0004、0053–0060；runtime 帶 Homebrew 的 sdl2-compat＋SDL3，winebus 走 SDL（照 Highball） |
-| FEX | FEX-2610 加 Highball `fex/patches` 0001–0033，unix 端是 Highball 的 `fexunixlib_darwin.cpp`（每條執行緒都開硬體 TSO）。我們的 0035–0038（以 FBW A380 基準最佳化，說明在 fork 的 `runtime/fex/highball/README.md`）11/4 裝進遊戲用的 runtime 和遊戲 prefix；0037 由 MSFS 配方對 `\wasm\msfs2024\` 開 |
+| FEX | FEX-2610 加 Highball `fex/patches` 0001–0033，unix 端是 Highball 的 `fexunixlib_darwin.cpp`（每條執行緒都開硬體 TSO）。我們的 0035–0038（以 FBW A380 基準最佳化，說明在 fork 的 `runtime/fex/highball/README.md`）11/4 裝進遊戲用的 runtime 和遊戲 prefix；0037 由 MSFS 配方對 `\wasm\msfs2024\` 開；0039（入口不再存區塊 header，MD-11 回放 −6% 週期）在 fork 裡，還沒裝進遊戲 |
 | 圖形 | KosmicKrisp（Mesa `ce576c29ed` 加 fxgl/steamac v1.9.7 的 0001–0077，再加 [`patches/kk/`](patches/kk/)）；vkd3d-proton `21a49c97`（v3.0b）、DXVK `3cb664e1`（v2.6.2-23）加 [`patches/vkd3d-proton/`](patches/vkd3d-proton/)、[`patches/dxvk/`](patches/dxvk/)，編成 ARM64EC |
 | 其他 | GStreamer 1.28.7（官方 framework，用 Highball 的腳本精簡；沒有它開始畫面會一直黑） |
 | MSFS 2024 | Steam AppID 2537590，1.9.21.0 |
@@ -132,6 +133,7 @@ DXVK 和 vkd3d-proton 跟遊戲在同一個行程裡。編成 ARM64EC 之後遊�
 | `tools/cred-test/` | Credential Manager、BCrypt、DPAPI（`dpapitest.c`）測試 |
 | `tools/dr-test/` | `SetThreadContext` 除錯暫存器測試 |
 | `tools/eh-test/` | ARM64EC 例外處理與斷點恢復測試 |
+| `tools/fault-test/` | JIT 程式碼裡的存取違規要回報正確的 RIP（入口區塊、call 回來的區塊、三層深、熱迴圈、編過幾千個區塊之後），加跨快取線的未對齊 LOCK 指令；驗 FEX 0039 |
 | `tools/smc-test/`、`tools/smc-msfs/` | 自我修改程式碼的成本與正確性；`smc-msfs` 模擬 MSFS 那幾種寫法 |
 | `tools/tso-bench/` | x86 記憶體順序（軟體與硬體 TSO）的正確性與成本 |
 | `tools/share-test/` | D3D11↔D3D12 共用貼圖、Media Foundation 影片解碼與 `msvproc` 輸出 |

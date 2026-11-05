@@ -9,6 +9,7 @@
 | `dxvk/0001-…` | DXVK `3cb664e1`（v2.6.2-23） | D3D11 共用貼圖改走宿主記憶體，不靠 Win32 handle |
 | `dxvk/0002-…` | 接在 0001 後面 | 讓 libc++（llvm-mingw，編 ARM64EC 用）編得過：`unordered_map::emplace` 的空 key tuple 改成直接傳預設 key。缺的 `<algorithm>`、`<new>`、`<exception>` 由 `tools/d3d-build/cross-arm64ec.txt` 強制 include，不改子模組 |
 | `vkd3d-proton/0001-…` | vkd3d-proton `21a49c97`（v3.0b） | 同上，D3D12 那一側 |
+| `vkd3d-proton/0002-…` | 接在 0001 後面 | `VKD3D_SQUARK_RT_NOCAST=1`（預設關）：不是 TYPELESS、不是 UAV、沒指定 castable 格式的 render target，格式清單只留自己和 sRGB 雙胞胎，不再放 D3D12 轉型規則允許的 UINT／SINT 等。配合 `kk/0013`，R8G8B8A8_UNORM、R10G10B10A2_UNORM 這類 RT 拿回 Apple 的無損壓縮（離線 −40%，紀錄 25.56）。程式真的開了轉型 view 時，KosmicKrisp 會印 `kk: view as …` |
 
 | `notproton/0001-…` | NotProton `4df944f`（上游 main，11/3） | 把 payload 的 `steamac/`（`tools/np-build/build-notproton.sh` 收進去）寫進 FEX runner 並驗證（`SteamacOverlay.swift`）；圖形後端多一個「vkd3d-proton + KosmicKrisp」（`CX_GRAPHICS_BACKEND=vkd3d`）；其他 FEX 遊戲的 Vulkan 經 loader 照舊走 MoltenVK；元件換了就讓 prefix 重跑 wine.inf；關掉 Sparkle 自動更新。等於 fork `jason5545/NotProton-steamac` 分支 `steamac` 的 `227fd2f` |
 
@@ -16,7 +17,7 @@
 
 ## kk/
 
-套在 Mesa `ce576c29ed` 加 fxgl/steamac v1.9.7 的 KosmicKrisp patch 0001–0077 之後：`tools/kk-build/build-kk.sh prepare $PWD/patches/kk/00*.patch`（0001–0011 依序，路徑要寫絕對路徑）。`build-kk.sh` 另外把 Mesa 磁碟 shader 快取的預設上限編成 8 GB（`-Dshader-cache-max-size`，Mesa 原本 1 GB，MSFS 11/4 塞滿過；環境變數 `MESA_SHADER_CACHE_MAX_SIZE` 照樣能蓋）。
+套在 Mesa `ce576c29ed` 加 fxgl/steamac v1.9.7 的 KosmicKrisp patch 0001–0077 之後：`tools/kk-build/build-kk.sh prepare $PWD/patches/kk/00*.patch`（0001–0013 依序，路徑要寫絕對路徑）。`build-kk.sh` 另外把 Mesa 磁碟 shader 快取的預設上限編成 8 GB（`-Dshader-cache-max-size`，Mesa 原本 1 GB，MSFS 11/4 塞滿過；環境變數 `MESA_SHADER_CACHE_MAX_SIZE` 照樣能蓋）。
 
 | 檔案 | 內容 |
 |---|---|
@@ -27,6 +28,8 @@
 | `0005-…only-on-request` | 除錯輸出預設關閉：steamac 0073 的 encoder 診斷原本在 Apple9 以上的 GPU 自動打開（M5 Max 每秒約 500 行，佔 Wine log 94%），改成要設 `MESA_KK_ENCODER_LOG=1`；0003 的 MSL 保存要設 `MESA_KK_DUMP_FAILED_MSL=1` |
 | `0006`–`0010` | Highball（highball-engine `kosmickrisp-arm64/highball/0001`–`0005`，`34bd3b0`）原樣搬來：sparse 資源可用 CPU 看得到的記憶體、產生的 MSL 壓縮並共用相同內容（Forza Horizon 6 的世界載入 19.5 GB → 4 GB）、壓縮貼圖不要求 shader 寫入、可寫 sparse 貼圖先排佇列分隔再對應、`HB_PRESENT_PACE_FPS` 平均送幀（預設不開）。0007 改 MSL 字串擁有權，steamac 0050–0077 和我們 0003 碰到這個字串的地方都核對過 |
 | `0011-…lighter-encoder-end-barriers…` | Highball 的 `0007`，兩處上下文手動放（`u_debug.h` include、`null_ubo` 釋放移到 `vk_pipeline_cache_destroy` 之前），程式碼是 Highball 的。**改預設**：encoder 結尾的 barrier 要 Device 可見性、不再用 ResourceAlias（Forza GPU 時間 −9%），除非 render encoder 跑過 occlusion query；`HB_KK_ALIAS_BARRIERS=1` 換回舊的。`HB_KK_NO_UBO_ROBUST=1` 預設不開。Highball 的 `0006`（磁碟快取）沒搬：steamac 0055 已經有，還多算了 GPU 家族、MSL 版本、workaround |
+| `0012-…robust-uniform-buffer-loads-per-16-byte-row` | 我們的。robustness 開著時（vkd3d-proton 一定開），每個 vec4 的 constant buffer 讀取原本被 NIR 拆成 4 個純量讀取、每個帶條件。KK 回報的 `robustUniformBufferAccessSizeAlignment` 是 64，所以不跨 16 B 列的讀取檢查起點一次就合規：新的 `nir_shader_compiler_options::bounded_ubo_row_loads` 讓這種讀取保持完整；越界時改讀 root 表尾端永遠是零的 32 B（`kk_root_descriptor_table::zero`），讀取本身不再帶條件。越界和 null CBV 照樣讀到 0。離線：動態索引 4.4 → 2.5 ms、固定位移 22.0 → 16.7–17.4 ms（`HB_KK_NO_UBO_ROBUST=1` 完全不檢查是 1.8、15.2–15.6），紀錄 25.56 |
+| `0013-…no-PixelFormatView-for-format-lists-of-sRGB-twins` | 我們的。`VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT` 原本一律加 `MTLTextureUsagePixelFormatView`，它會關掉 Apple 的無損壓縮（M5 Max 小程式：4 張 RGBA16F＋D32 的 load／store pass 3.1 倍；ShaderWrite 沒影響）。Metal 不帶這個旗標也能開只差 sRGB、或只改型別／層級／swizzle 的 view，所以格式清單只有自己和 sRGB 雙胞胎時不加；在算大小之前決定（壓縮要額外空間）。清單外的 view 會印 `kk: view as …`（最多 8 次）。vkd3d-proton 的清單一定含 UINT 等，要配 `vkd3d-proton/0002` 的開關才有效 |
 
 Metal 只對「透過帶 `raster_order_group` 屬性的參數」做的存取保證順序；從普通位址轉型拿到的貼圖 handle 或結構成員，屬性不會生效（M5 Max 實測：N 個重疊片段各做一次讀出加一寫回，只有經過參數的才剛好等於 N）。
 

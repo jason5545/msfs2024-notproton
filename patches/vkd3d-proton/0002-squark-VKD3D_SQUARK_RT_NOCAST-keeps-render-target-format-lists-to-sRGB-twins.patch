@@ -1,0 +1,98 @@
+From 91e32b6b7130ef9387c6c2c53dd2ed8c450e38a8 Mon Sep 17 00:00:00 2001
+From: jason chien <3936511+jason5545@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 20:07:03 +0800
+Subject: [PATCH] squark: VKD3D_SQUARK_RT_NOCAST keeps render target format
+ lists to sRGB twins
+
+Off unless VKD3D_SQUARK_RT_NOCAST=1. Render targets that are not typeless,
+not UAVs and have no castable format list then keep only their own format
+and its sRGB twin in VkImageFormatListCreateInfo, instead of every format
+D3D12's casting rules allow (CastingFullyTypedFormatSupported, which
+vkd3d-proton reports): R8G8B8A8_UNORM keeps UNORM and SRGB, R10G10B10A2_UNORM
+and R16G16_UNORM keep only themselves and are no longer mutable.
+
+On KosmicKrisp a mutable image gets MTLTextureUsagePixelFormatView, which
+turns Apple's lossless compression off; our KosmicKrisp patch 0013 leaves it
+out for a format list of sRGB twins. 16 G-buffer passes, each followed by a
+pass sampling the targets, 2056x1329 on an M5 Max: R8G8B8A8_UNORM 2.83 ->
+1.69 ms, R10G10B10A2_UNORM 2.60-2.90 -> 1.68 ms, same output.
+
+An application that does create a cast view (a UINT view of a UNORM render
+target) breaks the format list; KosmicKrisp then logs "kk: view as ...".
+---
+ libs/vkd3d/resource.c | 52 +++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 52 insertions(+)
+
+diff --git a/libs/vkd3d/resource.c b/libs/vkd3d/resource.c
+index f679ff6f..665b6bf2 100644
+--- a/libs/vkd3d/resource.c
++++ b/libs/vkd3d/resource.c
+@@ -379,6 +379,53 @@ static bool vkd3d_get_castable_format_compatibility_list(const struct d3d12_devi
+     return list->format_count != 0;
+ }
+ 
++/* VKD3D_SQUARK_RT_NOCAST=1 (Squark, off by default): render targets that are not typeless, not UAVs and
++ * have no castable format list keep only their own format and its sRGB twin in the view format list,
++ * instead of every format D3D12's casting rules allow (CastingFullyTypedFormatSupported). On
++ * KosmicKrisp a format list of sRGB twins needs no MTLTextureUsagePixelFormatView, which turns Apple's
++ * lossless compression off; a pass that loads and stores four render targets took 3.1x as long with it
++ * (M5 Max). An application that does cast such a target breaks the format list: KosmicKrisp logs
++ * "kk: view as ... created for sRGB/linear views only". */
++static bool vkd3d_squark_rt_nocast(void)
++{
++    static int enabled = -1;
++    char env[8];
++
++    if (vkd3d_atomic_uint32_load_explicit((uint32_t *)&enabled, vkd3d_memory_order_relaxed) == (uint32_t)-1)
++    {
++        int value = vkd3d_get_env_var("VKD3D_SQUARK_RT_NOCAST", env, sizeof(env)) && env[0] == '1';
++        if (value)
++            INFO("VKD3D_SQUARK_RT_NOCAST: render target format lists keep sRGB twins only.\n");
++        vkd3d_atomic_uint32_store_explicit((uint32_t *)&enabled, value, vkd3d_memory_order_relaxed);
++    }
++    return enabled == 1;
++}
++
++static VkFormat vkd3d_squark_srgb_twin(VkFormat format)
++{
++    switch (format)
++    {
++        case VK_FORMAT_R8G8B8A8_UNORM: return VK_FORMAT_R8G8B8A8_SRGB;
++        case VK_FORMAT_R8G8B8A8_SRGB:  return VK_FORMAT_R8G8B8A8_UNORM;
++        case VK_FORMAT_B8G8R8A8_UNORM: return VK_FORMAT_B8G8R8A8_SRGB;
++        case VK_FORMAT_B8G8R8A8_SRGB:  return VK_FORMAT_B8G8R8A8_UNORM;
++        default: return format;
++    }
++}
++
++static void vkd3d_squark_trim_rt_casts(const struct vkd3d_format *format, struct vkd3d_format_compatibility_list *list)
++{
++    VkFormat twin = vkd3d_squark_srgb_twin(format->vk_format);
++    unsigned int i, n = 0;
++
++    for (i = 0; i < list->format_count; i++)
++    {
++        if (list->vk_formats[i] == format->vk_format || list->vk_formats[i] == twin)
++            list->vk_formats[n++] = list->vk_formats[i];
++    }
++    list->format_count = n;
++}
++
+ static bool vkd3d_get_format_compatibility_list(const struct d3d12_device *device,
+         const D3D12_RESOURCE_DESC1 *desc, struct vkd3d_format_compatibility_list *list, VkImageCreateFlags *vk_flags)
+ {
+@@ -429,6 +476,11 @@ static bool vkd3d_get_format_compatibility_list(const struct d3d12_device *devic
+         }
+     }
+ 
++    if ((desc->Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) &&
++            !(desc->Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS) &&
++            format->type != VKD3D_FORMAT_TYPE_TYPELESS && vkd3d_squark_rt_nocast())
++        vkd3d_squark_trim_rt_casts(format, list);
++
+     if (list->format_count < 2)
+         return false;
+ 
+-- 
+2.56.0
+

@@ -1,0 +1,166 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: jason chien <3936511+jason5545@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 20:10:00 +0800
+Subject: [PATCH 13/13] kk: no MTLTextureUsagePixelFormatView for format lists
+ of sRGB twins
+
+VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT always added MTLTextureUsagePixelFormatView,
+which turns Apple's lossless compression off. M5 Max, a pass loading and
+storing four RGBA16F targets and a D32 depth (2056x1329, Metal directly):
+0.40 ms without it, 1.24 ms with it on smoothly varying contents, and 23%
+slower on incompressible ones. MTLTextureUsageShaderWrite made no
+difference there.
+
+Metal makes views that only toggle sRGB, change the texture type, levels or
+slices, or swizzle without the flag (checked with the Metal validation
+layer); views in any other format need it. So an image whose
+VkImageFormatListCreateInfo lists only its own format and its sRGB/linear
+twin does not get the flag. The decision is made before the layout's size is
+computed, since compression metadata takes room.
+
+vkd3d-proton gives D3D12 render targets a format list, but one with every
+format D3D12's casting rules allow (UNORM, UINT, SINT, SRGB for
+R8G8B8A8_UNORM), so this alone changes nothing for it; its
+VKD3D_SQUARK_RT_NOCAST=1 (our vkd3d-proton patch 0002) trims the list of
+plain render targets to the sRGB twins. A view outside such a list is invalid
+Vulkan and Metal: KosmicKrisp logs "kk: view as <format> of a <format> image
+created for sRGB/linear views only" (8 times at most).
+
+Through vkd3d-proton (tools/gpu-bench d3d12gpu rt, 16 G-buffer passes each
+followed by a pass sampling the targets): R8G8B8A8_UNORM 2.83 ms -> 1.69 ms,
+R10G10B10A2_UNORM 2.60-2.90 -> 1.68 with the switch, the same without it;
+FLOAT and TYPELESS targets and incompressible contents unchanged; output
+checksums equal.
+
+Applies after 0012.
+---
+--- a/src/kosmickrisp/vulkan/kk_image.c
++++ b/src/kosmickrisp/vulkan/kk_image.c
+@@ -585,7 +585,38 @@
+           * than a tile */
+          .flags = 0u,
+       };
++   }
++}
++
++/* VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT asks Metal for
++ * MTLTextureUsagePixelFormatView, which turns lossless compression off (M5 Max:
++ * a pass that loads and stores four RGBA16F targets took 3.1x as long). Metal
++ * makes views that only toggle sRGB without it, so an image whose format list
++ * has nothing else does not need it. vkd3d-proton gives render targets a
++ * format list. */
++static bool
++kk_image_srgb_views_only(const VkImageCreateInfo *pCreateInfo)
++{
++   if (!(pCreateInfo->flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) ||
++       (pCreateInfo->flags & VK_IMAGE_CREATE_BLOCK_TEXEL_VIEW_COMPATIBLE_BIT) ||
++       vk_format_get_plane_count(pCreateInfo->format) != 1 ||
++       vk_format_is_depth_or_stencil(pCreateInfo->format))
++      return false;
++
++   const VkImageFormatListCreateInfo *list =
++      vk_find_struct_const(pCreateInfo->pNext, IMAGE_FORMAT_LIST_CREATE_INFO);
++   if (list == NULL || list->viewFormatCount == 0u)
++      return false;
++
++   const enum pipe_format base =
++      util_format_linear(vk_format_to_pipe_format(pCreateInfo->format));
++   for (uint32_t i = 0u; i < list->viewFormatCount; ++i) {
++      const enum pipe_format view =
++         vk_format_to_pipe_format(list->pViewFormats[i]);
++      if (util_format_linear(view) != base || kk_get_va_format(view) == NULL)
++         return false;
+    }
++   return true;
+ }
+ 
+ static VkResult
+@@ -593,6 +624,7 @@
+               const VkImageCreateInfo *pCreateInfo)
+ {
+    vk_image_init(&dev->vk, &image->vk, pCreateInfo);
++   const bool srgb_views_only = kk_image_srgb_views_only(pCreateInfo);
+ 
+    /* Match the non-optimal limits advertised by the image format query before
+     * calculating a linear layout (which only allocates level 0). Metal aborts,
+@@ -644,7 +676,7 @@
+       const uint8_t height_scale =
+          ycbcr_info ? ycbcr_info->planes[plane].denominator_scales[1] : 1;
+       kk_image_layout_init(dev, &image->vk, vk_format_to_pipe_format(format),
+-                           width_scale, height_scale,
++                           width_scale, height_scale, srgb_views_only,
+                            &image->planes[plane].layout);
+    }
+ 
+--- a/src/kosmickrisp/vulkan/kk_image_layout.c
++++ b/src/kosmickrisp/vulkan/kk_image_layout.c
+@@ -219,7 +219,8 @@
+ void
+ kk_image_layout_init(const struct kk_device *dev, const struct vk_image *image,
+                      enum pipe_format format, const uint8_t width_scale,
+-                     const uint8_t height_scale, struct kk_image_layout *layout)
++                     const uint8_t height_scale, bool srgb_views_only,
++                     struct kk_image_layout *layout)
+ {
+    const struct kk_physical_device *pdev = kk_device_physical(dev);
+    const struct kk_va_format *supported_format = kk_get_va_format(format);
+@@ -234,6 +235,9 @@
+       pdev, image->usage, image->tiling, image->create_flags, format);
+    layout->usage = vk_image_usage_flags_to_mtl_texture_usage(
+       image->usage, image->create_flags, supported_format->atomic);
++   /* Before the size is computed: compression metadata takes room. */
++   if (srgb_views_only)
++      layout->usage &= ~MTL_TEXTURE_USAGE_PIXEL_FORMAT_VIEW;
+    if (util_format_is_compressed(format))
+       layout->usage &= ~MTL_TEXTURE_USAGE_SHADER_WRITE;
+    layout->create_flags = image->create_flags;
+--- a/src/kosmickrisp/vulkan/kk_image_layout.h
++++ b/src/kosmickrisp/vulkan/kk_image_layout.h
+@@ -216,9 +216,14 @@
+                                   VkImageCreateFlags flags,
+                                   enum pipe_format format);
+ 
++/* srgb_views_only: the image is VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT but its
++ * VkImageFormatListCreateInfo only has its own format and its sRGB/linear
++ * twin, views Metal makes without MTLTextureUsagePixelFormatView (which turns
++ * lossless compression off). */
+ void kk_image_layout_init(const struct kk_device *dev,
+                           const struct vk_image *image, enum pipe_format format,
+                           const uint8_t width_scale, const uint8_t height_scale,
++                          bool srgb_views_only,
+                           struct kk_image_layout *layout);
+ 
+ #endif /* KK_IMAGE_LAYOUT_H */
+--- a/src/kosmickrisp/vulkan/kk_image_view.c
++++ b/src/kosmickrisp/vulkan/kk_image_view.c
+@@ -16,6 +16,7 @@
+ #include "kosmickrisp/bridge/mtl_bridge.h"
+ #include "kosmickrisp/bridge/mtl_format.h"
+ 
++#include "util/u_atomic.h"
+ #include "vk_format.h"
+ 
+ static enum pipe_swizzle
+@@ -160,6 +161,22 @@
+       const struct kk_va_format *supported_format = kk_get_va_format(p_format);
+       assert(supported_format);
+ 
++      /* An image whose format list only allowed sRGB/linear views has no
++       * MTLTextureUsagePixelFormatView (kk_image_srgb_views_only); a view
++       * outside that list is invalid Vulkan and invalid Metal, and may read
++       * compressed contents wrongly. Say so, a few times. */
++      if ((image->vk.create_flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) &&
++          !(plane->layout.usage & MTL_TEXTURE_USAGE_PIXEL_FORMAT_VIEW) &&
++          util_format_linear(p_format) !=
++             util_format_linear(plane->layout.format.pipe)) {
++         static uint32_t warned;
++         if (p_atomic_inc_return(&warned) <= 8u)
++            mesa_logw("kk: view as %s of a %s image created for sRGB/linear "
++                      "views only (format list)",
++                      util_format_name(p_format),
++                      util_format_name(plane->layout.format.pipe));
++      }
++
+       struct kk_view_layout view_layout = {
+          .view_type = remove_1d_view_types(view->vk.view_type),
+          .sample_count_sa = plane->layout.sample_count_sa,

@@ -1,0 +1,187 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: jason chien <3936511+jason5545@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 19:50:00 +0800
+Subject: [PATCH 12/12] kk: robust uniform buffer loads per 16-byte row, from
+ the root table's zero bytes when out of bounds
+
+With robust uniform buffers (vkd3d-proton asks for robustBufferAccess2, so
+every D3D12 CBV read in a descriptor table goes this way),
+nir_lower_explicit_io split each UBO load into one
+load_global_constant_bounded per component, and nir_to_msl printed each as
+`off < bound ? *(constant T *)(base + off) : 0`: a vec4 constant became four
+conditional scalar loads. Measured through vkd3d-proton (tools/gpu-bench,
+2056x1329, 8 draws), HB_KK_NO_UBO_ROBUST=1 (no checks at all) was 2.5x
+faster on a loop of per-pixel indexed reads and 30% faster on reads at fixed
+offsets, but reads past a CBV then return the next bytes instead of zero.
+
+robustUniformBufferAccessSizeAlignment is KK_MIN_UBO_ALIGNMENT (64), so a
+load that stays within one 16-byte row is entirely inside or entirely
+outside the rounded range once its start is checked:
+
+- nir_shader_compiler_options::bounded_ubo_row_loads (new, set by KK) keeps
+  such a load whole in nir_lower_explicit_io; anything else is still split.
+- nir_to_msl loads from `off < bound ? base + off : &root.zero` instead of
+  loading under a condition: kk_root_descriptor_table gains 32 bytes that are
+  never written (the command buffer state is zeroed when recording begins),
+  passed as nir_to_msl_options::root_zero_offset. The load is unconditional,
+  which lets Metal schedule it; out of bounds and null descriptors still read
+  zero.
+
+Same loop: 4.41-4.57 ms before, 2.48-2.55 ms after (no checks 1.79); fixed
+offsets, 128 rows: 21.97-22.16 ms before, 16.71-17.41 after (no checks
+15.24-15.57). Output checksums equal, a read past a 256-byte CBV and a read
+of a null CBV return 0 as before.
+
+Applies after 0011.
+---
+--- a/src/compiler/nir/nir_shader_compiler_options.h
++++ b/src/compiler/nir/nir_shader_compiler_options.h
+@@ -742,6 +742,18 @@
+ 
+    /** Backend supports load_global_bounded intrinsics. */
+    bool has_load_global_bounded;
++
++   /**
++    * A UBO load through nir_address_format_64bit_bounded_global that stays
++    * within one 16-byte row stays one load_global_constant_bounded instead of
++    * one per component. The backend must check the load's start offset
++    * against the bound and return zero for the whole load when it is out of
++    * bounds, and the driver must round uniform buffer ranges for robustness to
++    * a multiple of at least 16 bytes (robustUniformBufferAccessSizeAlignment):
++    * then the rest of the row is inside the rounded range whenever the start
++    * is inside the bound.
++    */
++   bool bounded_ubo_row_loads;
+ 
+    /** Backend supports load/store_global_offset*/
+    bool has_global_offset;
+--- a/src/compiler/nir/nir_lower_explicit_io.c
++++ b/src/compiler/nir/nir_lower_explicit_io.c
+@@ -1491,6 +1491,15 @@
+    bool scalarize = vec_stride > scalar_size ||
+                     addr_format_needs_bounds_check(addr_format);
+ 
++   /* See nir_shader_compiler_options::bounded_ubo_row_loads. */
++   if (scalarize && vec_stride == scalar_size &&
++       b->shader->options->bounded_ubo_row_loads &&
++       addr_format == nir_address_format_64bit_bounded_global &&
++       intrin->intrinsic == nir_intrinsic_load_deref &&
++       deref->modes == nir_var_mem_ubo && align_mul >= 16 &&
++       (align_offset % 16) + intrin->num_components * scalar_size <= 16)
++      scalarize = false;
++
+    switch (intrin->intrinsic) {
+    case nir_intrinsic_load_deref: {
+       nir_def *value;
+--- a/src/kosmickrisp/compiler/msl_private.h
++++ b/src/kosmickrisp/compiler/msl_private.h
+@@ -25,6 +25,7 @@
+    nir_shader *shader;
+    struct _mesa_string_buffer *text;
+    uint64_t disabled_workarounds;
++   uint32_t root_zero_offset;
+    bool uses_per_draw_data;
+    /* Fragment shader interlock (D3D12 ROVs) through Metal raster order groups:
+     * storage texture handles and device memory are reached from parameters
+--- a/src/kosmickrisp/compiler/nir_to_msl.c
++++ b/src/kosmickrisp/compiler/nir_to_msl.c
+@@ -1708,14 +1708,39 @@
+       break;
+    }
+    case nir_intrinsic_load_global_constant_bounded: {
++      /* The whole load is in bounds when its start is: it may be a vector
++       * within one 16-byte row (nir_shader_compiler_options::
++       * bounded_ubo_row_loads). */
++      const char *type = msl_type_for_def(ctx->types, &instr->def);
++      if (ctx->root_zero_offset != 0u) {
++         /* Out of bounds, load the root table's zero bytes instead: the load
++          * itself is unconditional. */
++         if (instr->def.num_components == 1) {
++            P(ctx, "*(constant %s*)(", type);
++         } else {
++            P(ctx, "%s(*(constant packed_%s*)(", type, type);
++         }
++         src_to_msl(ctx, &instr->src[1]);
++         P(ctx, " < ");
++         src_to_msl(ctx, &instr->src[2]);
++         P(ctx, " ? (");
++         src_to_msl(ctx, &instr->src[0]);
++         P(ctx, " + ");
++         src_to_msl(ctx, &instr->src[1]);
++         P(ctx, ") : (ulong)&buf0.contents[%u])", ctx->root_zero_offset);
++         if (instr->def.num_components != 1) {
++            P(ctx, ")");
++         }
++         P(ctx, ";\n");
++         break;
++      }
+       src_to_msl(ctx, &instr->src[1]);
+       P(ctx, " < ");
+       src_to_msl(ctx, &instr->src[2]);
+       P(ctx, " ? ");
+       src_to_packed_load_offset(ctx, &instr->src[0], &instr->src[1], "constant",
+-                                msl_type_for_def(ctx->types, &instr->def),
+-                                instr->def.num_components);
+-      P(ctx, " : 0;\n");
++                                type, instr->def.num_components);
++      P(ctx, " : %s(0);\n", type);
+       break;
+    }
+    case nir_intrinsic_load_global_constant_offset: {
+@@ -3331,6 +3356,7 @@
+       .shader = shader,
+       .text = _mesa_string_buffer_create(options->mem_ctx, 1024),
+       .disabled_workarounds = options->disabled_workarounds,
++      .root_zero_offset = options->root_zero_offset,
+    };
+    nir_function_impl *impl = nir_shader_get_entrypoint(shader);
+    msl_gather_info(&ctx, options);
+--- a/src/kosmickrisp/compiler/nir_to_msl.h
++++ b/src/kosmickrisp/compiler/nir_to_msl.h
+@@ -45,6 +45,12 @@
+     * the render target has. This leads to an incorrect calculation of the
+     * component count for the render target formats. */
+    uint8_t rts_component_count[MAX_DRAW_BUFFERS];
++
++   /* Offset in buffer(0) (the root table) of 32 bytes that are always zero.
++    * load_global_constant_bounded then loads from there when out of bounds,
++    * an unconditional load the compiler can schedule freely, instead of a
++    * load under a condition. 0: no such bytes, the load stays conditional. */
++   uint32_t root_zero_offset;
+ };
+ 
+ /* Assumes nir_shader_gather_info has been called beforehand. */
+@@ -152,6 +158,9 @@
+    .lower_ufind_msb = true,
+    .lower_find_lsb = true,
+    .has_uclz = true,
++   /* load_global_constant_bounded checks the start offset (nir_to_msl.c) and
++    * robustUniformBufferAccessSizeAlignment is KK_MIN_UBO_ALIGNMENT (64). */
++   .bounded_ubo_row_loads = true,
+    .lower_mul_2x32_64 = true,
+    .lower_uadd_carry = true,
+    .lower_usub_borrow = true,
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.h
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+@@ -60,6 +60,11 @@
+ 
+    /* Start index in dynamic_buffers where each set starts */
+    uint8_t set_dynamic_buffer_start[KK_MAX_SETS];
++
++   /* Never written, so always zero (the state is zeroed when recording
++    * begins): an out-of-bounds uniform buffer load reads here instead of
++    * being conditional (nir_to_msl_options::root_zero_offset). */
++   uint64_t zero[4];
+ };
+ 
+ struct kk_descriptor_state {
+--- a/src/kosmickrisp/vulkan/kk_shader.c
++++ b/src/kosmickrisp/vulkan/kk_shader.c
+@@ -1266,6 +1266,7 @@
+    struct nir_to_msl_options translate_options = {
+       .mem_ctx = NULL,
+       .disabled_workarounds = pdev->settings.disabled_workarounds,
++      .root_zero_offset = offsetof(struct kk_root_descriptor_table, zero),
+    };
+    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
+       for (uint32_t i = 0u; i < MAX_DRAW_BUFFERS; ++i) {

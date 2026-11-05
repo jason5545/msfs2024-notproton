@@ -1,7 +1,7 @@
-# 調查紀錄只放本機，不進版本控制（含 log、截圖分析、交接、開遊戲腳本）
-/records/
+# 調查紀錄不進這個公開 repo（含 log、截圖分析、交接、開遊戲腳本）：實體在私人 repo jason5545/squark-private，這裡是連結
+/records
 
-# 代理規則只放本機
+# 代理規則不進這個公開 repo（實體在 squark-private，這裡是連結）
 /AGENTS.md
 /CLAUDE.md
 
@@ -17,8 +17,8 @@ tools/*/out/
 *.dylib
 .DS_Store
 
-# 控制前景、截圖的測試腳本只放本機
-/tools/video/
+# 控制前景、截圖的測試腳本不進這個公開 repo（實體在 squark-private，這裡是連結）
+/tools/video
 
 # padprobe 在 Mac 上編出來的執行檔
 tools/padprobe/macpad

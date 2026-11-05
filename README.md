@@ -16,8 +16,11 @@
 - 11/4 第一架官網版外掛：TFDi MD-11（Install Manager 是 WPF 程式）。它在 Wine 裡一勾模擬器就卡死，原因是 winemac 的主執行緒在更新 OpenGL 時排隊等它自己，上游 Wine 也還沒修，我們加了 Wine patch 0060 修掉。之後用 Wine 內建的 Wine Mono 就能裝完，不用另外裝 .NET Framework。MD-11F 在台北松山 RCSS 進得了駕駛艙，PFD、ND、EICAS、MCDU 都正常，停在跑道上約 15 FPS（同一台機器 A330 約 30 FPS）。
 - 11/4 下午：fork 出來的 app 改名 Squark（app 名稱、資料夾、Steam 裡的工具名稱），GitHub 是 [`jason5545/squark-app`](https://github.com/jason5545/squark-app)。FEX patch 0035–0038（FBW A380 基準快 5.5%）裝進遊戲用的 runtime 和 prefix，MD-11 在遊戲裡的 FPS 還沒量。
 - 11/4 傍晚：把 MD-11 的 WASM 拿到模擬器外面、用錄好的快照回放量 FEX。原本量到的「FEX 是原生的 3.1 倍」大半來自測試程式本身：wasm2c 編 Windows 版時每次函式呼叫都用 TLS 數呼叫深度（Mac 版沒有），MD-11 每幀約 84 萬次呼叫，這個計數器在 FEX 上變成一條串在記憶體上的相依鏈。不數深度的版本 FEX 只是原生的 1.41 倍（週期），比 A380 基準的 1.8 倍還低。MSFS 自己怎麼編 WASM 不知道（遊戲檔案不拆）。新的 FEX patch 0039 在 MD-11 回放上再省 6% 週期，16:4x 裝進遊戲用的 runtime 和 prefix，遊戲裡還沒量。
+- 11/5 午休：MSFS 的 HTML／JS 儀表跑在 Coherent GT 的 JavaScriptCore 上，之前啟動選項帶 `JSC_useJIT=false`，JS 只走直譯器。開 JIT 時 FEX 偶爾會跑到 JSC 改寫前的舊翻譯而崩潰，修法是區塊失效時把入口改成交回 dispatcher（FEX patch 0040，還在跑完整驗收）。裝上修法、拿掉 `JSC_useJIT=false` 後，FBW A380X 停在 RCSS 28 駕駛艙從 21 FPS 變成 36–38 FPS，停了約 3 分鐘沒崩潰。一幀從 48 ms 降到 27 ms。
 
 ![TFDi MD-11F 在 RCSS 跑道頭的駕駛艙，PFD、ND、EICAS、MCDU 都有畫面](docs/img/md11-rcss-cockpit.jpg)
+
+![FBW A380X 在 RCSS 28 跑道頭的駕駛艙，JS 開 JIT 後 37 FPS](docs/img/a380x-rcss-cockpit-jsjit.jpg)
 
 ## 環境
 

@@ -58,10 +58,12 @@ Wine 的 loader 是 runtime 裡的 `Wine.app`，要有 Cross-architecture Compat
 模擬器的 Squark 面板「圖形」選「vkd3d-proton + KosmicKrisp」（`HADRON_GRAPHICS=vkd3d`）：覆蓋層 `lib/graphics/vkd3d`＋`lib/graphics/dxvk` 排在 Wine 自己的 DLL 前面，Vulkan 走 KosmicKrisp，並設 `VKD3D_FEATURE_LEVEL=12_1`、`VKD3D_SHADER_MODEL=6_7`、`DXVK_CONFIG`。只有 arm64（FEX）runtime 有這個選項。MSFS 現在的 Steam 啟動選項還是 NotProton 時期的寫法，`compat_run.sh` 會對應成 `HADRON_*` 的名稱（改名成 Squark 之後，這些變數名稱照舊）：
 
 ```
-VKD3D_SQUARK_RT_NOCAST=1 CX_GRAPHICS_BACKEND=vkd3d %command%
+VKD3D_SQUARK_RT_NOCAST=1 VKD3D_CONFIG=no_staggered_submit CX_GRAPHICS_BACKEND=vkd3d %command%
 ```
 
 `VKD3D_SQUARK_RT_NOCAST=1`（11/5 20:16 起）：vkd3d-proton 不是 TYPELESS、不是 UAV 的 render target 格式清單只留自己和 sRGB 雙胞胎，配合 KosmicKrisp `patches/kk/0013`，RGBA8、RGB10A2 這類 RT 拿回 Apple 的無損壓縮（見 `patches/README.md`）。模擬器如果真的把這種 RT 轉成 UINT 之類的格式來讀，Wine log 會有 `kk: view as …`，那時畫面可能不對，把這個變數拿掉就回到原本的行為。
+
+`VKD3D_CONFIG=no_staggered_submit`（11/6 07:34 起）：KosmicKrisp 只有一個 queue family，模擬器的 DIRECT 和 COMPUTE queue 同時在用時，vkd3d-proton 會開 staggered submissions：每次提交後在 CPU 上等前一次在 GPU 做完，跨 queue 的 fence 也改在 CPU 上等。這個旗標兩個都關。模擬器的 Wine log 顯示約七成五的時間開著；離線測試（`tools/gpu-bench` 的 `stagger` 模式，兩條 queue、每幀重錄）快 8–16%，每次提交量大時沒差。上游 vkd3d-proton 對 UE 的遊戲預設開這個旗標，Highball 的 MSFS 配方也設了。模擬器裡省多少還沒量。拿掉就回到原本的行為。
 
 11/5 以前還帶 `NOTPROTON_ENV_JSC_useJIT=false`，讓 Coherent GT 的 JavaScriptCore 只走直譯器，因為開 JIT 時 FEX 會偶爾崩潰。FEX patch 0040 修掉之後拿掉了，A380X 從 21 FPS 變成 36–38 FPS（見上面的現況）。
 

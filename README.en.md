@@ -58,10 +58,12 @@ Wine's loader is the runtime's `Wine.app`. It needs the Cross-architecture Compa
 In the game's Squark panel, "Graphics" set to "vkd3d-proton + KosmicKrisp" (`HADRON_GRAPHICS=vkd3d`) puts the overlays `lib/graphics/vkd3d` and `lib/graphics/dxvk` ahead of Wine's own DLLs, points Vulkan at KosmicKrisp, and sets `VKD3D_FEATURE_LEVEL=12_1`, `VKD3D_SHADER_MODEL=6_7` and `DXVK_CONFIG`. Only the arm64 (FEX) runtime offers it. MSFS's Steam launch options are still written the NotProton way, and `compat_run.sh` maps them to the `HADRON_*` names (which kept their names when the app became Squark):
 
 ```
-VKD3D_SQUARK_RT_NOCAST=1 CX_GRAPHICS_BACKEND=vkd3d %command%
+VKD3D_SQUARK_RT_NOCAST=1 VKD3D_CONFIG=no_staggered_submit CX_GRAPHICS_BACKEND=vkd3d %command%
 ```
 
 `VKD3D_SQUARK_RT_NOCAST=1` (since Nov 5, 20:16): vkd3d-proton keeps only a render target's own format and its sRGB twin in the format list of render targets that are not TYPELESS or UAVs; with KosmicKrisp `patches/kk/0013`, RGBA8 and RGB10A2 targets get Apple's lossless compression back (see `patches/README.md`). If the simulator does read such a target as UINT or another cast format, the Wine log shows `kk: view as …` and the picture may be wrong; removing the variable restores the old behaviour.
+
+`VKD3D_CONFIG=no_staggered_submit` (since Nov 6, 07:34): KosmicKrisp has one queue family, so while the simulator's DIRECT and COMPUTE queues are both busy, vkd3d-proton turns on staggered submissions: after each submission the CPU waits for the previous one to finish on the GPU, and fence waits across queues happen on the CPU. The flag turns both off. The simulator's Wine logs show it on about three quarters of the time; offline (`tools/gpu-bench`'s `stagger` mode, two queues, lists re-recorded each frame) it is 8–16% faster, and makes no difference when each submission is large. Upstream vkd3d-proton sets it by default for UE games, and Highball's MSFS recipe sets it too. The gain in the simulator has not been measured. Removing it restores the old behaviour.
 
 Until Nov 5 they also carried `NOTPROTON_ENV_JSC_useJIT=false`, keeping Coherent GT's JavaScriptCore in its interpreter, because FEX now and then crashed with the JIT on. FEX patch 0040 fixed that and the option came out; the A380X went from 21 FPS to 36–38 FPS (see the status above).
 

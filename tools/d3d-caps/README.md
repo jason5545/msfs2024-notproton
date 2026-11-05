@@ -1,6 +1,6 @@
 # d3d-caps
 
-用來量 medium 對 ultra 的 GPU 那一側，不開遊戲（紀錄 25.53）。
+用來量 medium 對 ultra 的 GPU 那一側，不開模擬器（紀錄 25.53）。
 
 - `d3d12caps.c`：查 vkd3d-proton＋KosmicKrisp 回報的 D3D12 功能（feature level、shader model、raytracing、mesh shader、VRS、sampler feedback），試 GPU 時間戳（direct、copy queue）和 `QueryVideoMemoryInfo`。`build.sh` 用 Homebrew 的 mingw-w64 編。
 - `mst_gpu.py <trace> [pid]`：把 Instruments 的 Metal System Trace（`xcrun xctrace record --template 'Metal System Trace' --attach <pid>`）換成每幀 GPU 毫秒。

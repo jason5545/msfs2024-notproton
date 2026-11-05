@@ -37,7 +37,7 @@ Metal 只對「透過帶 `raster_order_group` 屬性的參數」做的存取保�
 | 檔案 | 內容 |
 |---|---|
 | `0001-…x86-execute-breakpoints…` | FEXCore 的 JIT 在已設斷點的位址前插檢查，命中送 #DB（DR6、EFLAGS.RF 語意）；ARM64EC 前端每執行緒保存 DR0–DR7，執行期 detour CrossOver ntdll 的 ARM64EC `NtSetContextThread`／`NtGetContextThread`（它的 x64 context 轉換會丟掉除錯暫存器） |
-| `0002`–`0004` `…STEAMAC_EXCLOG…` | 只記錄：`STEAMAC_EXCLOG=1` 時記下交給遊戲的例外、遊戲堆疊、主程式頭幾次存取違規的暫存器與可讀字串 |
+| `0002`–`0004` `…STEAMAC_EXCLOG…` | 只記錄：`STEAMAC_EXCLOG=1` 時記下交給模擬器的例外、模擬器的堆疊、主程式頭幾次存取違規的暫存器與可讀字串 |
 | `0005-…drop-the-pending-RF…` | 例外處理把執行位置改到別處時清掉待處理的 RF，否則下一次命中同一個斷點會被吞掉 |
 | `0006-…adaptive-per-page-SMC…` | SMC 熱頁：同一頁寫入故障太頻繁就不再防寫，改成從那頁編出的指令執行前逐條檢查自己的位元組（`STEAMAC_SMC_HOT=0` 關閉，`STEAMAC_SMCSTATS=1` 印統計） |
 | `0007-…hardware-TSO-on-macOS…` | unixlib 可以在 macOS 編：`SetHardwareTSOControl` 呼叫 `thread_set_x86_64_compat()`（macOS 26 SDK 的公開函式，Wine 的 loader 有它要的權限），其他只有 Linux 有的控制回 `STATUS_NOT_SUPPORTED`；這個開關只管呼叫它的執行緒，所以 `ThreadInit` 每條新執行緒都再開一次。沒有這個 unixlib 時 FEX 用軟體模擬 x86 記憶體順序（`tools/tso-bench`） |

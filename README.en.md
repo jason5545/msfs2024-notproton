@@ -57,8 +57,10 @@ Wine's loader is the runtime's `Wine.app`. It needs the Cross-architecture Compa
 In the game's Squark panel, "Graphics" set to "vkd3d-proton + KosmicKrisp" (`HADRON_GRAPHICS=vkd3d`) puts the overlays `lib/graphics/vkd3d` and `lib/graphics/dxvk` ahead of Wine's own DLLs, points Vulkan at KosmicKrisp, and sets `VKD3D_FEATURE_LEVEL=12_1`, `VKD3D_SHADER_MODEL=6_7` and `DXVK_CONFIG`. Only the arm64 (FEX) runtime offers it. MSFS's Steam launch options are still written the NotProton way, and `compat_run.sh` maps them to the `HADRON_*` names (which kept their names when the app became Squark):
 
 ```
-CX_GRAPHICS_BACKEND=vkd3d NOTPROTON_ENV_JSC_useJIT=false %command%
+CX_GRAPHICS_BACKEND=vkd3d %command%
 ```
+
+Until Nov 5 they also carried `NOTPROTON_ENV_JSC_useJIT=false`, keeping Coherent GT's JavaScriptCore in its interpreter, because FEX now and then crashed with the JIT on. FEX patch 0040 fixed that and the option came out; the A380X went from 21 FPS to 36–38 FPS (see the status above).
 
 `CX_GRAPHICS_BACKEND` maps to `HADRON_GRAPHICS` and `NOTPROTON_ENV_<name>` to `HADRON_ENV_<name>` (a Hadron name already set wins). On the arm64 runtime MSFS (2537590) automatically gets Highball's MSFS SMC settings (`HB_FEX_SMC_RETIRE=1 HB_FEX_SMC_SKIP_SAME=1 HB_FEX_SMC_HOT_MAXINST=64 HB_FEX_VM_FASTPATH=1 HB_FEX_SMC_DEFER_CALLRET=1`) and `SQUARK_FEX_ABI_FLAGS=\wasm\msfs2024\` (FEX 0037, only for the WebAssembly modules the game compiles for aircraft and gauges); launch options win.
 

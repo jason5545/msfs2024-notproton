@@ -3,7 +3,7 @@
  *
  *  1. DXGI factory and adapter; D3D12CreateDevice; max feature level, highest shader model (asks for 6.7),
  *     binding/mesh/raytracing tiers. Says whether d3d12.dll / dxgi.dll are Wine builtins or native (vkd3d-proton, DXVK).
- *  2. A 640x360 window with a FLIP_DISCARD swapchain, 120 presented frames (about 2 s).
+ *  2. A 640x360 window with a FLIP_DISCARD swapchain, 120 presented frames (about 2 s; D3D12TEST_FRAMES overrides).
  *  3. Frame 30: a geometry shader expands one point into a full-screen green quad. Frame 60: hull and domain shaders
  *     tessellate one full-screen patch, blue. Each is read back from the back buffer before presenting, so a wrong
  *     colour means the stage did not run (or ran wrong), not just that the pipeline was accepted.
@@ -241,8 +241,11 @@ int main(void) {
   }
 
   int presents_ok = 0, gs_result = -1, ts_result = -1;
+  /* D3D12TEST_FRAMES: present this many frames instead of 120 (longer runs for overlays such as MTL_HUD). */
+  const char *fenv = getenv("D3D12TEST_FRAMES");
+  int nframes = fenv && atoi(fenv) > 0 ? atoi(fenv) : 120;
   DWORD t0 = GetTickCount();
-  for (int frame = 0; frame < 120; frame++) {
+  for (int frame = 0; frame < nframes; frame++) {
     MSG msg;
     while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) { TranslateMessage(&msg); DispatchMessageA(&msg); }
     UINT idx = IDXGISwapChain3_GetCurrentBackBufferIndex(sc);
@@ -306,10 +309,10 @@ int main(void) {
     else if (presents_ok == frame) printf("  Present(frame %d) = 0x%08lx\n", frame, hr);
   }
   DWORD ms = GetTickCount() - t0;
-  printf("presents ok %d/120 in %lu ms\n", presents_ok, ms);
+  printf("presents ok %d/%d in %lu ms\n", presents_ok, nframes, ms);
   printf("GS test: %s\n", gs_result < 0 ? "SKIP" : gs_result ? "PASS" : "FAIL");
   printf("tessellation test: %s\n", ts_result < 0 ? "SKIP" : ts_result ? "PASS" : "FAIL");
-  if (presents_ok != 120 || gs_result == 0 || ts_result == 0) fail = 1;
+  if (presents_ok != nframes || gs_result == 0 || ts_result == 0) fail = 1;
   HRESULT removed = ID3D12Device_GetDeviceRemovedReason(dev);
   printf("device removed reason 0x%08lx\n", removed);
   if (removed) fail = 1;

@@ -17,6 +17,7 @@
 - 11/4 下午：fork 出來的 app 改名 Squark（app 名稱、資料夾、Steam 裡的工具名稱），GitHub 是 [`jason5545/squark-app`](https://github.com/jason5545/squark-app)。FEX patch 0035–0038（FBW A380 基準快 5.5%）裝進模擬器用的 runtime 和 prefix，MD-11 在模擬器裡的 FPS 還沒量。
 - 11/4 傍晚：把 MD-11 的 WASM 拿到模擬器外面、用錄好的快照回放量 FEX。原本量到的「FEX 是原生的 3.1 倍」大半來自測試程式本身：wasm2c 編 Windows 版時每次函式呼叫都用 TLS 數呼叫深度（Mac 版沒有），MD-11 每幀約 84 萬次呼叫，這個計數器在 FEX 上變成一條串在記憶體上的相依鏈。不數深度的版本 FEX 只是原生的 1.41 倍（週期），比 A380 基準的 1.8 倍還低。MSFS 自己怎麼編 WASM 不知道（模擬器檔案不拆）。新的 FEX patch 0039 在 MD-11 回放上再省 6% 週期，16:4x 裝進模擬器用的 runtime 和 prefix，模擬器裡還沒量。
 - 11/5 午休：MSFS 的 HTML／JS 儀表跑在 Coherent GT 的 JavaScriptCore 上，之前啟動選項帶 `JSC_useJIT=false`，JS 只走直譯器。開 JIT 時 FEX 偶爾會跑到 JSC 改寫前的舊翻譯而崩潰，修法是區塊失效時把入口改成交回 dispatcher（FEX patch 0040）。裝上修法、拿掉 `JSC_useJIT=false` 後，FBW A380X 停在 RCSS 28 駕駛艙從 21 FPS 變成 36–38 FPS，停了約 3 分鐘沒崩潰。一幀從 48 ms 降到 27 ms。下午驗收時發現午休那版在「另一條執行緒一直往程式碼旁邊寫資料」時會一直重新翻譯（Highball 的 `smcretire` 那段從 1 秒變 89 秒），改成「剛編好的區塊這一次直接進去」後回到原本的速度，14:1x 換進模擬器；回歸測試 25 項、`leatest`、`fault-test`、A380X 和 MD-11 的雜湊、24 個 JS 儀表的輸出都跟 0039 相同。
+- 11/5 晚上：量測局那一幕（A380X、RCSS、medium、夜間）GPU 每幀 30.9 ms、約 85–90% 忙，卡在 GPU。查到 KosmicKrisp 兩個多花的地方，都用自己寫的 D3D12 小程式離線量過（`tools/gpu-bench/`）：constant buffer 的越界檢查把每個 vec4 讀取拆成 4 個帶條件的讀取（`patches/kk/0012`，固定位移 22.0 → 17.0 ms），RGBA8 這類 render target 因為「可轉格式」的旗標被關掉無損壓縮（`patches/kk/0013` 加 vkd3d-proton 的開關，G-buffer pass 2.83 → 1.69 ms）。20:1x 換進模擬器用的 runtime，啟動選項加了開關，模擬器裡還沒量。
 
 ![TFDi MD-11F 在 RCSS 跑道頭的駕駛艙，PFD、ND、EICAS、MCDU 都有畫面](docs/img/md11-rcss-cockpit.jpg)
 
@@ -57,8 +58,10 @@ Wine 的 loader 是 runtime 裡的 `Wine.app`，要有 Cross-architecture Compat
 模擬器的 Squark 面板「圖形」選「vkd3d-proton + KosmicKrisp」（`HADRON_GRAPHICS=vkd3d`）：覆蓋層 `lib/graphics/vkd3d`＋`lib/graphics/dxvk` 排在 Wine 自己的 DLL 前面，Vulkan 走 KosmicKrisp，並設 `VKD3D_FEATURE_LEVEL=12_1`、`VKD3D_SHADER_MODEL=6_7`、`DXVK_CONFIG`。只有 arm64（FEX）runtime 有這個選項。MSFS 現在的 Steam 啟動選項還是 NotProton 時期的寫法，`compat_run.sh` 會對應成 `HADRON_*` 的名稱（改名成 Squark 之後，這些變數名稱照舊）：
 
 ```
-CX_GRAPHICS_BACKEND=vkd3d %command%
+VKD3D_SQUARK_RT_NOCAST=1 CX_GRAPHICS_BACKEND=vkd3d %command%
 ```
+
+`VKD3D_SQUARK_RT_NOCAST=1`（11/5 20:16 起）：vkd3d-proton 不是 TYPELESS、不是 UAV 的 render target 格式清單只留自己和 sRGB 雙胞胎，配合 KosmicKrisp `patches/kk/0013`，RGBA8、RGB10A2 這類 RT 拿回 Apple 的無損壓縮（見 `patches/README.md`）。模擬器如果真的把這種 RT 轉成 UINT 之類的格式來讀，Wine log 會有 `kk: view as …`，那時畫面可能不對，把這個變數拿掉就回到原本的行為。
 
 11/5 以前還帶 `NOTPROTON_ENV_JSC_useJIT=false`，讓 Coherent GT 的 JavaScriptCore 只走直譯器，因為開 JIT 時 FEX 會偶爾崩潰。FEX patch 0040 修掉之後拿掉了，A380X 從 21 FPS 變成 36–38 FPS（見上面的現況）。
 

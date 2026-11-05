@@ -7,8 +7,10 @@
   - `cbfix [iters]`：同上，但全是固定位移（遊戲 shader 常數的典型讀法），數值精確，任何版本 checksum 都該相同。
   - `rt <format> [splits] [smooth|noise]`：每段一個 G-buffer pass（4 張 RT＋D32）加一個讀這 4 張的 pass，量 RT 的存取頻寬。格式 `rgba8`、`rgba8srgb`、`rgba8tl`（TYPELESS）、`rgb10a2`、`rg16`、`rgba16f`。
   - `rtcast`：在 R8G8B8A8_UNORM 的 RT 上開 UNORM_SRGB 和 UINT 兩個 SRV，看驅動對轉型 view 說什麼。
+  - `stagger [frames] [lists] [iters] [two|one]`：一條 DIRECT、一條 COMPUTE queue 每幀各送 `lists` 個 command list（各一個 dispatch，`iters` 調工作量），DIRECT 用 fence 等 COMPUTE，CPU 最多讓 2 幀在路上（紀錄 25.58）。這是 vkd3d-proton 在只有一個 queue family 的裝置上打開 staggered submissions 的條件。印每幀的牆上時間、GPU 工作時間（時間戳）、GPU 忙碌比例和兩個 buffer 的 checksum。`one` 是對照組：全部送 DIRECT，COMPUTE 不用。
 - `build.sh`：用 Homebrew 的 mingw-w64 編。
 - `run.sh <runtime> <prefix 絕對路徑> <輸出資料夾> <模式和參數…>`：照 `compat_run.sh` 選 vkd3d 的環境跑，Mesa shader 快取關掉（`HB_KK_NO_UBO_ROBUST` 這類開關會改編出來的 shader）。runtime 用 `hadron-test` 裡的複本，prefix 用一次性的。
+- `stagger.sh <runtime> <prefix> <輸出>`：`stagger` 模式的 A/B，A 是預設、B 加 `VKD3D_CONFIG=no_staggered_submit`，每個點交替跑 `ROUNDS`（3）輪，掃 `LISTS`×`ITERS`×`MODES`，開 `VKD3D_DEBUG=info` 數「Enabling staggered」。結果在 `<輸出>/summary.tsv`，`stagger_sum.py summary.tsv` 印每個點的中位數、最小值、B/A、checksum 是否一致。
 - `accept-kk.sh <runtime> <prefix> <輸出>`：改 KosmicKrisp 之後的回歸：`tools/np-gfx` 的 d3d12test（背景模式，winwatch 盯著）、vktest，加上 vkrov N=1024（有／沒有 interlock，影像和 buffer）。vkrov 在 `~/GitHub/msfs-src/gpu-1105/vkrov`（`VKROV=` 可改）。
 
 Shader 是執行時用 Wine 內建的 d3dcompiler_47 編的 DXBC（SM 5），模擬器用的是 DXIL（SM 6，經 dxil-spirv）。兩條路的 constant buffer 都變成 Vulkan UBO、RT 都經 vkd3d-proton 建 image，所以量到的是同一段 KosmicKrisp 程式。

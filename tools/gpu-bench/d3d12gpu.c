@@ -16,6 +16,8 @@
  *      that samples the 4 (like deferred lighting), so the targets are stored, read as textures and loaded
  *      again. <format>: rgba8 (R8G8B8A8_UNORM), rgba8srgb, rgba8tl (R8G8B8A8_TYPELESS viewed as UNORM),
  *      rgb10a2, rg16 (R16G16_UNORM), rgba16f (R16G16B16A16_FLOAT). <content>: smooth (default) or noise.
+ *   d3d12gpu stagger [frames] [lists] [iters] [two|one] [reuse|fresh]
+ *      A DIRECT and a COMPUTE queue submitting every frame (vkd3d-proton staggered submissions), see run_stagger.
  *   d3d12gpu rtcast
  *      Creates an R8G8B8A8_UNORM render target and SRVs of it as UNORM_SRGB and as UINT (a cast D3D12
  *      allows), for checking what a driver says about the UINT view (records 25.56).
@@ -579,11 +581,234 @@ static int run_rtcast(void)
     return 0;
 }
 
+/* stagger: a DIRECT and a COMPUTE queue that both submit every frame, the pattern that turns on
+ * vkd3d-proton's staggered submissions on a device with one queue family (records 25.58). Each frame the
+ * compute queue runs <lists> command lists (one dispatch each) and signals a fence; the direct queue waits
+ * for it, runs its own <lists> and signals; the CPU keeps at most 2 frames in flight. Each list writes
+ * timestamps around its dispatch. Prints the frame interval (CPU, between frame submissions), the GPU time
+ * per frame (sum of the dispatches) and the GPU span of a frame, then a checksum of both buffers.
+ * <mode> one: all 2 x <lists> lists go to the direct queue and the compute queue stays idle (control).
+ * <rec> fresh: reset and re-record every list each frame, as games do; default (reuse) records them once and
+ * submits the same lists again, which KosmicKrisp re-records internally (Metal command buffers are one-time). */
+static const char stagger_src[] =
+    "RWStructuredBuffer<uint> B : register(u0);\n"
+    "cbuffer K : register(b0) { uint salt; };\n"
+    "[numthreads(64, 1, 1)] void cs(uint3 id : SV_DispatchThreadID) {\n"
+    "  uint a = B[id.x];\n"
+    "  [loop] for (uint i = 0; i < ITERS; i++) { a = a * 1664525u + 1013904223u + salt; a ^= a >> 13; }\n"
+    "  B[id.x] = a; }\n";
+
+#define SG_GROUPS 256
+#define SG_MAXL 128
+
+/* One stagger list: timestamp, dispatch on <b>, UAV barrier, timestamp, resolve both into <rb> at <qi>. */
+static void sg_record(ID3D12GraphicsCommandList *c, ID3D12RootSignature *rs, ID3D12Resource *b,
+                      ID3D12QueryHeap *qh, ID3D12Resource *rb, UINT qi, UINT salt)
+{
+    ID3D12GraphicsCommandList_SetComputeRootSignature(c, rs);
+    ID3D12GraphicsCommandList_SetComputeRootUnorderedAccessView(c, 0, ID3D12Resource_GetGPUVirtualAddress(b));
+    ID3D12GraphicsCommandList_SetComputeRoot32BitConstant(c, 1, salt, 0);
+    ID3D12GraphicsCommandList_EndQuery(c, qh, D3D12_QUERY_TYPE_TIMESTAMP, qi);
+    ID3D12GraphicsCommandList_Dispatch(c, SG_GROUPS, 1, 1);
+    D3D12_RESOURCE_BARRIER ub = { D3D12_RESOURCE_BARRIER_TYPE_UAV, 0 };
+    ub.UAV.pResource = b;
+    ID3D12GraphicsCommandList_ResourceBarrier(c, 1, &ub);
+    ID3D12GraphicsCommandList_EndQuery(c, qh, D3D12_QUERY_TYPE_TIMESTAMP, qi + 1);
+    ID3D12GraphicsCommandList_ResolveQueryData(c, qh, D3D12_QUERY_TYPE_TIMESTAMP, qi, 2, rb, (UINT64)qi * 8);
+    HRESULT hr = ID3D12GraphicsCommandList_Close(c);
+    if (FAILED(hr)) die("Close", hr);
+}
+
+static int run_stagger(int frames, int lists, int iters, int one, int fresh)
+{
+    if (lists < 1 || lists > SG_MAXL || frames < 10) {
+        printf("stagger: 10 <= frames, 1 <= lists <= %d\n", SG_MAXL);
+        return 2;
+    }
+    char its[16];
+    snprintf(its, sizeof(its), "%d", iters);
+    D3D_SHADER_MACRO defs[] = { { "ITERS", its }, { NULL, NULL } };
+    ID3DBlob *cs = shader(stagger_src, "cs", "cs_5_0", defs);
+
+    D3D12_ROOT_PARAMETER rp[2];
+    memset(rp, 0, sizeof(rp));
+    rp[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
+    rp[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    rp[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    rp[1].Constants.Num32BitValues = 1;
+    rp[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    D3D12_ROOT_SIGNATURE_DESC rsd = { 2, rp, 0, NULL, 0 };
+    ID3D12RootSignature *rs = root_signature(&rsd);
+    D3D12_COMPUTE_PIPELINE_STATE_DESC cpd;
+    memset(&cpd, 0, sizeof(cpd));
+    cpd.pRootSignature = rs;
+    cpd.CS.pShaderBytecode = ID3D10Blob_GetBufferPointer(cs);
+    cpd.CS.BytecodeLength = ID3D10Blob_GetBufferSize(cs);
+    ID3D12PipelineState *ps = NULL;
+    HRESULT hr = ID3D12Device_CreateComputePipelineState(dev, &cpd, &IID_ID3D12PipelineState, (void **)&ps);
+    if (FAILED(hr)) die("CreateComputePipelineState", hr);
+
+    D3D12_COMMAND_QUEUE_DESC qd = { D3D12_COMMAND_LIST_TYPE_COMPUTE, 0, 0, 0 };
+    ID3D12CommandQueue *cq = NULL;
+    hr = ID3D12Device_CreateCommandQueue(dev, &qd, &IID_ID3D12CommandQueue, (void **)&cq);
+    if (FAILED(hr)) die("CreateCommandQueue(compute)", hr);
+    UINT64 cfreq = 0;
+    ID3D12CommandQueue_GetTimestampFrequency(cq, &cfreq);
+
+    const UINT64 bsize = SG_GROUPS * 64 * 4;
+    /* buf[0]: work of the compute queue (or the first half in mode one), buf[1]: the direct queue's. */
+    ID3D12Resource *buf[2];
+    for (int q = 0; q < 2; q++) {
+        D3D12_HEAP_PROPERTIES hp = { D3D12_HEAP_TYPE_DEFAULT };
+        D3D12_RESOURCE_DESC rd = { D3D12_RESOURCE_DIMENSION_BUFFER, 0, bsize, 1, 1, 1, DXGI_FORMAT_UNKNOWN,
+                                   {1, 0}, D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+                                   D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS };
+        hr = ID3D12Device_CreateCommittedResource(dev, &hp, 0, &rd, D3D12_RESOURCE_STATE_COMMON, NULL,
+                                                  &IID_ID3D12Resource, (void **)&buf[q]);
+        if (FAILED(hr)) die("CreateCommittedResource(uav)", hr);
+    }
+
+    /* Per frame slot (2) and per queue (2): <lists> lists, 2 timestamps each. */
+    const UINT nq = 2 * 2 * lists * 2;
+    D3D12_QUERY_HEAP_DESC qhd = { D3D12_QUERY_HEAP_TYPE_TIMESTAMP, nq, 0 };
+    ID3D12QueryHeap *qh = NULL;
+    hr = ID3D12Device_CreateQueryHeap(dev, &qhd, &IID_ID3D12QueryHeap, (void **)&qh);
+    if (FAILED(hr)) die("CreateQueryHeap", hr);
+    ID3D12Resource *rb = buffer(D3D12_HEAP_TYPE_READBACK, (UINT64)nq * 8, D3D12_RESOURCE_STATE_COPY_DEST);
+
+    static ID3D12GraphicsCommandList *cl[2][2][SG_MAXL];
+    static ID3D12CommandAllocator *cal[2][2][SG_MAXL];
+    for (int s = 0; s < 2; s++)
+        for (int q = 0; q < 2; q++)
+            for (int l = 0; l < lists; l++) {
+                /* q 0 = compute queue, q 1 = direct queue; in mode one both are direct lists. */
+                D3D12_COMMAND_LIST_TYPE t = (q == 0 && !one) ? D3D12_COMMAND_LIST_TYPE_COMPUTE
+                                                             : D3D12_COMMAND_LIST_TYPE_DIRECT;
+                ID3D12CommandAllocator *ca = NULL;
+                hr = ID3D12Device_CreateCommandAllocator(dev, t, &IID_ID3D12CommandAllocator, (void **)&ca);
+                if (FAILED(hr)) die("CreateCommandAllocator", hr);
+                ID3D12GraphicsCommandList *c = NULL;
+                hr = ID3D12Device_CreateCommandList(dev, 0, t, ca, ps, &IID_ID3D12GraphicsCommandList,
+                                                    (void **)&c);
+                if (FAILED(hr)) die("CreateCommandList", hr);
+                cal[s][q][l] = ca;
+                cl[s][q][l] = c;
+                sg_record(c, rs, buf[q], qh, rb, ((s * 2 + q) * lists + l) * 2, (UINT)(q * 1000 + l));
+            }
+
+    ID3D12Fence *fc = NULL, *fd = NULL;
+    ID3D12Device_CreateFence(dev, 0, 0, &IID_ID3D12Fence, (void **)&fc);
+    ID3D12Device_CreateFence(dev, 0, 0, &IID_ID3D12Fence, (void **)&fd);
+    HANDLE ev = CreateEventA(NULL, FALSE, FALSE, NULL);
+    LARGE_INTEGER qpf, t0, t1;
+    QueryPerformanceFrequency(&qpf);
+    const int warm = 20;
+    double *iv = calloc(frames, sizeof(double)), *gw = calloc(frames, sizeof(double)),
+           *gs = calloc(frames, sizeof(double));
+    int ngpu = 0;
+    LARGE_INTEGER prev = { 0 }, mstart = { 0 };
+    for (int f = 1; f <= frames + warm; f++) {
+        int s = f & 1;
+        if (f > 2) {
+            /* Frame f - 2 used this slot: wait for it, then read its timestamps. */
+            if (ID3D12Fence_GetCompletedValue(fd) < (UINT64)(f - 2)) {
+                ID3D12Fence_SetEventOnCompletion(fd, f - 2, ev);
+                WaitForSingleObject(ev, 30000);
+            }
+            if (f - 2 > warm) {
+                UINT64 *v = NULL;
+                D3D12_RANGE r = { 0, (SIZE_T)nq * 8 };
+                ID3D12Resource_Map(rb, 0, &r, (void **)&v);
+                UINT64 lo = ~0ull, hi = 0;
+                double sum = 0;
+                for (int q = 0; q < 2; q++)
+                    for (int l = 0; l < lists; l++) {
+                        UINT qi = ((s * 2 + q) * lists + l) * 2;
+                        sum += (double)(v[qi + 1] - v[qi]);
+                        if (v[qi] < lo) lo = v[qi];
+                        if (v[qi + 1] > hi) hi = v[qi + 1];
+                    }
+                ID3D12Resource_Unmap(rb, 0, NULL);
+                gw[ngpu] = sum * 1000.0 / (double)ts_freq;
+                gs[ngpu] = (double)(hi - lo) * 1000.0 / (double)ts_freq;
+                ngpu++;
+            }
+            if (fresh)
+                for (int q = 0; q < 2; q++)
+                    for (int l = 0; l < lists; l++) {
+                        ID3D12CommandAllocator_Reset(cal[s][q][l]);
+                        ID3D12GraphicsCommandList_Reset(cl[s][q][l], cal[s][q][l], ps);
+                        sg_record(cl[s][q][l], rs, buf[q], qh, rb, ((s * 2 + q) * lists + l) * 2,
+                                  (UINT)(q * 1000 + l));
+                    }
+        }
+        QueryPerformanceCounter(&t0);
+        if (f == warm + 1)
+            mstart = t0;
+        if (f > warm + 1)
+            iv[f - warm - 2] = (double)(t0.QuadPart - prev.QuadPart) * 1000.0 / (double)qpf.QuadPart;
+        prev = t0;
+        if (one) {
+            for (int q = 0; q < 2; q++)
+                for (int l = 0; l < lists; l++)
+                    ID3D12CommandQueue_ExecuteCommandLists(queue, 1, (ID3D12CommandList **)&cl[s][q][l]);
+            ID3D12CommandQueue_Signal(queue, fd, f);
+        } else {
+            for (int l = 0; l < lists; l++)
+                ID3D12CommandQueue_ExecuteCommandLists(cq, 1, (ID3D12CommandList **)&cl[s][0][l]);
+            ID3D12CommandQueue_Signal(cq, fc, f);
+            ID3D12CommandQueue_Wait(queue, fc, f);
+            for (int l = 0; l < lists; l++)
+                ID3D12CommandQueue_ExecuteCommandLists(queue, 1, (ID3D12CommandList **)&cl[s][1][l]);
+            ID3D12CommandQueue_Signal(queue, fd, f);
+        }
+    }
+    ID3D12Fence_SetEventOnCompletion(fd, frames + warm, ev);
+    WaitForSingleObject(ev, 30000);
+    QueryPerformanceCounter(&t1);
+    double total = (double)(t1.QuadPart - mstart.QuadPart) * 1000.0 / (double)qpf.QuadPart;
+    int niv = frames - 1;
+    qsort(iv, niv, sizeof(double), cmp_double);
+    qsort(gw, ngpu, sizeof(double), cmp_double);
+    qsort(gs, ngpu, sizeof(double), cmp_double);
+    printf("stagger mode=%s rec=%s frames=%d lists=%d per queue iters=%d groups=%d VKD3D_CONFIG=%s\n",
+           one ? "one" : "two", fresh ? "fresh" : "reuse", frames, lists, iters, SG_GROUPS,
+           getenv("VKD3D_CONFIG") ? getenv("VKD3D_CONFIG") : "(unset)");
+    printf("frame ms (total/frames) %.3f   interval median %.3f  p90 %.3f  max %.3f\n", total / frames,
+           iv[niv / 2], iv[niv * 9 / 10], iv[niv - 1]);
+    printf("GPU ms per frame: work median %.3f  span median %.3f   busy (work / frame) %.1f%%\n", gw[ngpu / 2],
+           gs[ngpu / 2], 100.0 * gw[ngpu / 2] / (total / frames));
+    printf("timestamp freq direct %llu compute %llu\n", (unsigned long long)ts_freq, (unsigned long long)cfreq);
+
+    /* Checksum of both buffers (FNV-1a), through a readback copy on the direct queue. */
+    ID3D12Resource *crb = buffer(D3D12_HEAP_TYPE_READBACK, bsize * 2, D3D12_RESOURCE_STATE_COPY_DEST);
+    ID3D12CommandAllocator *ca = NULL;
+    ID3D12Device_CreateCommandAllocator(dev, D3D12_COMMAND_LIST_TYPE_DIRECT, &IID_ID3D12CommandAllocator,
+                                        (void **)&ca);
+    ID3D12GraphicsCommandList *c = NULL;
+    ID3D12Device_CreateCommandList(dev, 0, D3D12_COMMAND_LIST_TYPE_DIRECT, ca, NULL,
+                                   &IID_ID3D12GraphicsCommandList, (void **)&c);
+    for (int q = 0; q < 2; q++)
+        ID3D12GraphicsCommandList_CopyBufferRegion(c, crb, bsize * q, buf[q], 0, bsize);
+    ID3D12GraphicsCommandList_Close(c);
+    ID3D12CommandQueue_ExecuteCommandLists(queue, 1, (ID3D12CommandList **)&c);
+    wait_idle();
+    unsigned char *p = NULL;
+    D3D12_RANGE r = { 0, (SIZE_T)(bsize * 2) };
+    ID3D12Resource_Map(crb, 0, &r, (void **)&p);
+    unsigned long long h = 1469598103934665603ull;
+    for (UINT64 i = 0; i < bsize * 2; i++)
+        h = (h ^ p[i]) * 1099511628211ull;
+    ID3D12Resource_Unmap(crb, 0, NULL);
+    printf("checksum %016llx\n", h);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
     if (argc < 2) {
-        printf("usage: d3d12gpu cb [iters] | rt <format> [splits] [smooth|noise]\n");
+        printf("usage: d3d12gpu cb [iters] | rt <format> [splits] [smooth|noise] | stagger [frames] [lists] [iters] [two|one] [reuse|fresh]\n");
         return 2;
     }
     HMODULE dc = LoadLibraryA("d3dcompiler_47.dll");
@@ -614,6 +839,10 @@ int main(int argc, char **argv)
         return run_rtcast();
     if (!strcmp(argv[1], "rt") && argc > 2)
         return run_rt(argv[2], argc > 3 ? atoi(argv[3]) : 8, argc > 4 ? argv[4] : "smooth");
-    printf("usage: d3d12gpu cb [iters] | rt <format> [splits] [smooth|noise]\n");
+    if (!strcmp(argv[1], "stagger"))
+        return run_stagger(argc > 2 ? atoi(argv[2]) : 300, argc > 3 ? atoi(argv[3]) : 32,
+                           argc > 4 ? atoi(argv[4]) : 2000, argc > 5 && !strcmp(argv[5], "one"),
+                           argc > 6 && !strcmp(argv[6], "fresh"));
+    printf("usage: d3d12gpu cb [iters] | rt <format> [splits] [smooth|noise] | stagger [frames] [lists] [iters] [two|one] [reuse|fresh]\n");
     return 2;
 }

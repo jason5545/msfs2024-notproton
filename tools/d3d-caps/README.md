@@ -5,6 +5,7 @@
 - `d3d12caps.c`：查 vkd3d-proton＋KosmicKrisp 回報的 D3D12 功能（feature level、shader model、raytracing、mesh shader、VRS、sampler feedback），試 GPU 時間戳（direct、copy queue）和 `QueryVideoMemoryInfo`。`build.sh` 用 Homebrew 的 mingw-w64 編。
 - `mst_gpu.py <trace> [pid]`：把 Instruments 的 Metal System Trace（`xcrun xctrace record --template 'Metal System Trace' --attach <pid>`）換成每幀 GPU 毫秒。
 - `mst_gaps.py <metal-gpu-intervals.xml> <pid> [present 次數]`：從 Metal System Trace 匯出的 GPU intervals 算一個程序的 GPU 空檔：大小分布、各段佔空檔多少、空檔前後的 command buffer 編號有沒有變（在 command buffer 之間還是裡面；KK 用 MTL4，編號會重複用，只能比相鄰兩個），以及 command buffer 內部 40–160 µs 空檔前後的 encoder 類型（紀錄 25.58）。
+- `mst_encgaps.py <metal-gpu-intervals.xml> <pid> [幀數]`：同一份 intervals，看空檔裡夾了什麼（紀錄 25.59）。每段空檔大小列出前後 encoder 編號跳幾號：同一個 command buffer 裡相鄰的 encoder 編號連號，跳 2 以上表示中間有沒留下區間的東西（KosmicKrisp 的 timestamp counter heap resolve 就是）；40–160 µs 的空檔再按前後區間分類：前面是小 Compute（< 6 µs，像 KK 寫 timestamp 前的 `write_u32`）、後面是 Vertex（list 開頭的 timestamp，`patches/kk/0014` 省得掉），或後面是 command buffer 最後一個小 Compute（list 結尾 resolve 完的 query copy，省不掉）。
 
 跑法照 `compat_run.sh` 選 vkd3d 時的環境，用 `tools/hadron/run.sh` 在一次性 prefix 跑：
 

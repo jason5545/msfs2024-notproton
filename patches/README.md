@@ -17,7 +17,7 @@
 
 ## kk/
 
-套在 Mesa `ce576c29ed` 加 fxgl/steamac v1.9.7 的 KosmicKrisp patch 0001–0077 之後：`tools/kk-build/build-kk.sh prepare $PWD/patches/kk/00*.patch`（0001–0013 依序，路徑要寫絕對路徑）。`build-kk.sh` 另外把 Mesa 磁碟 shader 快取的預設上限編成 8 GB（`-Dshader-cache-max-size`，Mesa 原本 1 GB，MSFS 11/4 塞滿過；環境變數 `MESA_SHADER_CACHE_MAX_SIZE` 照樣能蓋）。
+套在 Mesa `ce576c29ed` 加 fxgl/steamac v1.9.7 的 KosmicKrisp patch 0001–0077 之後：`tools/kk-build/build-kk.sh prepare $PWD/patches/kk/00*.patch`（0001–0014 依序，路徑要寫絕對路徑）。`build-kk.sh` 另外把 Mesa 磁碟 shader 快取的預設上限編成 8 GB（`-Dshader-cache-max-size`，Mesa 原本 1 GB，MSFS 11/4 塞滿過；環境變數 `MESA_SHADER_CACHE_MAX_SIZE` 照樣能蓋）。
 
 | 檔案 | 內容 |
 |---|---|
@@ -30,6 +30,7 @@
 | `0011-…lighter-encoder-end-barriers…` | Highball 的 `0007`，兩處上下文手動放（`u_debug.h` include、`null_ubo` 釋放移到 `vk_pipeline_cache_destroy` 之前），程式碼是 Highball 的。**改預設**：encoder 結尾的 barrier 要 Device 可見性、不再用 ResourceAlias（Forza GPU 時間 −9%），除非 render encoder 跑過 occlusion query；`HB_KK_ALIAS_BARRIERS=1` 換回舊的。`HB_KK_NO_UBO_ROBUST=1` 預設不開。Highball 的 `0006`（磁碟快取）沒搬：steamac 0055 已經有，還多算了 GPU 家族、MSL 版本、workaround |
 | `0012-…robust-uniform-buffer-loads-per-16-byte-row` | 我們的。robustness 開著時（vkd3d-proton 一定開），每個 vec4 的 constant buffer 讀取原本被 NIR 拆成 4 個純量讀取、每個帶條件。KK 回報的 `robustUniformBufferAccessSizeAlignment` 是 64，所以不跨 16 B 列的讀取檢查起點一次就合規：新的 `nir_shader_compiler_options::bounded_ubo_row_loads` 讓這種讀取保持完整；越界時改讀 root 表尾端永遠是零的 32 B（`kk_root_descriptor_table::zero`），讀取本身不再帶條件。越界和 null CBV 照樣讀到 0。離線：動態索引 4.4 → 2.5 ms、固定位移 22.0 → 16.7–17.4 ms（`HB_KK_NO_UBO_ROBUST=1` 完全不檢查是 1.8、15.2–15.6），紀錄 25.56 |
 | `0013-…no-PixelFormatView-for-format-lists-of-sRGB-twins` | 我們的。`VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT` 原本一律加 `MTLTextureUsagePixelFormatView`，它會關掉 Apple 的無損壓縮（M5 Max 小程式：4 張 RGBA16F＋D32 的 load／store pass 3.1 倍；ShaderWrite 沒影響）。Metal 不帶這個旗標也能開只差 sRGB、或只改型別／層級／swizzle 的 view，所以格式清單只有自己和 sRGB 雙胞胎時不加；在算大小之前決定（壓縮要額外空間）。清單外的 view 會印 `kk: view as …`（最多 8 次）。vkd3d-proton 的清單一定含 UINT 等，要配 `vkd3d-proton/0002` 的開關才有效 |
+| `0014-…resolve-timestamps-at-the-end-of-the-Metal-command-buffer` | 我們的。timestamp 的 counter heap resolve 原本在每個寫過 timestamp 的 encoder 結束後馬上做，下一個 encoder 要等它（M5 Max 沒錄 trace 時每次約 16–26 µs；trace 上是 command buffer 裡 40–160 µs、少一個 encoder 編號的空檔，飛行中每幀約 76 個，紀錄 25.57–25.59）。改成延到 Metal command buffer 結尾一起做，相鄰的照舊合併；`vkCmdCopyQueryPoolResults` 讀、`vkCmdResetQueryPool` 清 pool 之前，和換下一個 Metal command buffer 之前（16384 次上限、pre_gfx）先落地；reset 的 dispatch 另外對 Blit stage 下 barrier（copy 原本就有）。小程式：dispatch 和 draw 之間有 timestamp 54.6 → 29.0 µs、draw 後面有 timestamp 43.5 → 23.0 µs（沒 timestamp 是 22.3），照模擬器形狀的 list（timestamp、dispatch、draw、render pass 裡的 timestamp、ResolveQueryData）99.4 → 83.3 µs；copy 前那次 resolve 省不掉。`MESA_KK_EAGER_TS_RESOLVE=1` 退回逐個 encoder 做 |
 
 Metal 只對「透過帶 `raster_order_group` 屬性的參數」做的存取保證順序；從普通位址轉型拿到的貼圖 handle 或結構成員，屬性不會生效（M5 Max 實測：N 個重疊片段各做一次讀出加一寫回，只有經過參數的才剛好等於 N）。
 

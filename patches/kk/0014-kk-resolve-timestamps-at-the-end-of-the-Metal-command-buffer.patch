@@ -1,0 +1,194 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: jason chien <3936511+jason5545@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 08:30:00 +0800
+Subject: [PATCH 14/14] kk: resolve timestamps at the end of the Metal command
+ buffer
+
+end_encoder encoded the counter heap resolves of the timestamps an encoder
+wrote right after it. A resolve between two encoders holds the next encoder
+back: on an M5 Max, through vkd3d-proton (tools/gpu-bench d3d12gpu gaps,
+untraced, median of 3 alternating rounds, GPU time per pair), a dispatch and
+a draw 22.3 us, with a timestamp between them 54.6 us; with a timestamp
+after the draw inside the render pass 43.5 us. Instruments shows the wait as
+an idle gap with one encoder id missing (the resolve); in flight, MSFS 2024
+had about 76 such gaps a frame (records 25.57-25.59), mostly at the start
+and end of command lists that bracket their work with timestamps.
+
+The resolves now wait for the end of the Metal command buffer, adjacent
+entries merged as before. They land earlier where something needs them:
+before vkCmdCopyQueryPoolResults reads the pool BO, before
+vkCmdResetQueryPool zeroes it (its dispatch now also barriers against the
+blit stage, as the copy's always did), and before cmd_buf is closed for
+another Metal command buffer (the 16384-write split and the pre_gfx
+switch). With the same programs: 29.0 us and 23.0 us. A list shaped like a
+profiled pass of a game (timestamp, dispatch, draw, timestamp inside the
+render pass, ResolveQueryData) 99.4 -> 83.3 us: the resolve before its copy
+stays. Lists with one resolve each (compute only, or one timestamp per
+list) unchanged. Output checksums equal.
+
+No synchronization is lost: a resolve runs in the blit stage after every
+encoder before it, since each encoder ends with a barrier after all its
+stages before all queue stages (end_encoder), which is how the timestamps
+were in the heap before too. Readers of the resolved values on the GPU, the
+copy here and copies in later command buffers, barrier against the blit
+stage; the host reads them after the command buffer completed, which
+includes its resolves; a reset of the pool lands pending resolves first.
+Timestamp values: written, copied, reset and written again in one list,
+every frame nonzero and monotonic, dispatch durations unchanged (263.2 us,
+547 us). A timestamp pair around a draw now measures the draw (20 us)
+instead of the draw and a resolve (42 us).
+
+MESA_KK_EAGER_TS_RESOLVE=1 resolves after every encoder as before (only the
+reset's barrier stays).
+
+Applies after 0013.
+---
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.c
+@@ -79,6 +79,51 @@
+    kk_cmd_release_cmd_bufs(cmd);
+ }
+ 
++/* MESA_KK_EAGER_TS_RESOLVE=1: resolve timestamps after every encoder that
++ * wrote one, as before. By default they wait for the end of the Metal command
++ * buffer: a counter heap resolve between two encoders held the next encoder
++ * back 16-26 us on an M5 Max, and vkd3d-proton writes a timestamp before the
++ * first render pass of a profiled command list. */
++DEBUG_GET_ONCE_BOOL_OPTION(kk_eager_ts_resolve, "MESA_KK_EAGER_TS_RESOLVE",
++                           false)
++
++/* Encodes the pending timestamp resolves into cmd_buf, whose encoder has
++ * ended. The resolves run in the blit stage after every encoder before them:
++ * each encoder ends with a barrier before all queue stages (end_encoder), so
++ * the timestamps they wrote are in the heap. */
++static void
++kk_cmd_emit_ts_resolves(struct kk_cmd_buffer *cmd)
++{
++   util_dynarray_foreach(&cmd->ts_resolves, struct kk_ts_resolve, r) {
++      mtl_command_resolve_counter_heap(cmd->metal.cmd_buf, r->heap, r->index,
++                                       r->count, r->dst_addr);
++   }
++
++   util_dynarray_clear(&cmd->ts_resolves);
++}
++
++static void
++kk_cmd_flush_ts_resolves(struct kk_cmd_buffer *cmd)
++{
++   assert(cmd->metal.render == NULL && cmd->metal.compute == NULL);
++   kk_cmd_emit_ts_resolves(cmd);
++}
++
++/* Lands the pending timestamp resolves before the query pool BO is read or
++ * reset: ends the open encoder and encodes them. Returns whether there were
++ * any; the caller's next encoder then barriers against the blit stage. */
++bool
++kk_cmd_land_ts_resolves(struct kk_cmd_buffer *cmd)
++{
++   if (util_dynarray_num_elements(&cmd->ts_resolves, struct kk_ts_resolve) ==
++       0)
++      return false;
++
++   cs_end(cmd);
++   kk_cmd_flush_ts_resolves(cmd);
++   return true;
++}
++
+ /* Ends Metal command buffer recording and returns allocators to pool for
+  * reuse */
+ static void
+@@ -88,6 +133,7 @@
+       return;
+ 
+    cs_end(cmd);
++   kk_cmd_flush_ts_resolves(cmd);
+    cmd->record.metal_cmd_bufs = MIN2(
+       util_dynarray_num_elements(&cmd->metal.cmd_bufs, mtl_command_buffer *),
+       UINT16_MAX);
+@@ -336,6 +382,10 @@
+    if (next == NULL)
+       return;
+ 
++   /* The timestamps of cmd_buf's encoders resolve in it, ahead of the pre_gfx
++    * pass it takes; cs_start_render ended its encoder. */
++   kk_cmd_flush_ts_resolves(cmd);
++
+    mtl_command_allocator *allocator = cmd->metal.pre_gfx.allocator;
+    cmd->metal.pre_gfx.allocator = cmd->metal.allocator;
+    cmd->metal.pre_gfx.cmd_buf = cmd->metal.cmd_buf;
+@@ -368,6 +418,7 @@
+       return;
+ 
+    cs_end(cmd);
++   kk_cmd_flush_ts_resolves(cmd);
+    mtl_end_command_buffer(cmd->metal.cmd_buf);
+    mtl_begin_command_buffer(next, cmd->metal.allocator);
+    if (cmd->vk.base.object_name)
+@@ -584,13 +635,11 @@
+    mtl_end_encoding(encoder);
+    mtl_release(encoder);
+ 
+-   /* Fold the pending timestamp counter-heap resolves into `cmd_buf` */
+-   util_dynarray_foreach(&cmd->ts_resolves, struct kk_ts_resolve, r) {
+-      mtl_command_resolve_counter_heap(cmd->metal.cmd_buf, r->heap, r->index,
+-                                       r->count, r->dst_addr);
+-   }
+-
+-   util_dynarray_clear(&cmd->ts_resolves);
++   /* MESA_KK_EAGER_TS_RESOLVE=1: fold the pending timestamp counter-heap
++    * resolves into `cmd_buf` after each encoder (otherwise
++    * kk_cmd_flush_ts_resolves at the end of `cmd_buf`) */
++   if (debug_get_option_kk_eager_ts_resolve())
++      kk_cmd_emit_ts_resolves(cmd);
+ }
+ 
+ static void
+--- a/src/kosmickrisp/vulkan/kk_cmd_buffer.h
++++ b/src/kosmickrisp/vulkan/kk_cmd_buffer.h
+@@ -305,7 +305,10 @@
+          mtl_compute_encoder *compute;
+       } pre_gfx;
+    } metal;
+-   /* Pending timestamp resolves (struct kk_ts_resolve), flushed at cs_end. */
++   /* Pending timestamp resolves (struct kk_ts_resolve) of cmd_buf, encoded at
++    * its end or before something reads or resets the query pool BO
++    * (kk_cmd_land_ts_resolves); at every cs_end with
++    * MESA_KK_EAGER_TS_RESOLVE=1. */
+    struct util_dynarray ts_resolves;
+    /* Timestamps already sampled by the current render encoder. (struct
+     * kk_ts_stage_entry). */
+@@ -397,6 +400,7 @@
+ mtl_compute_encoder *cs_get_pre_gfx(struct kk_cmd_buffer *cmd);
+ void kk_cmd_count_ts_writes(struct kk_cmd_buffer *cmd, uint32_t writes);
+ void cs_end(struct kk_cmd_buffer *cmd);
++bool kk_cmd_land_ts_resolves(struct kk_cmd_buffer *cmd);
+ void kk_cmd_bind_root_to_argument_table(struct kk_cmd_buffer *cmd,
+                                         uint64_t addr);
+ 
+--- a/src/kosmickrisp/vulkan/kk_query_pool.c
++++ b/src/kosmickrisp/vulkan/kk_query_pool.c
+@@ -397,9 +397,11 @@
+ 
+    /* A prior timestamp write may have a resolve still pending. Land it before
+     * the reset zeroes the pool BO, otherwise the deferred resolve would clobber
+-    * the reset and leave the query spuriously available. */
+-   if (util_dynarray_num_elements(&cmd->ts_resolves, struct kk_ts_resolve) > 0)
+-      cs_end(cmd);
++    * the reset and leave the query spuriously available. The resolve runs in
++    * the blit stage: the reset's dispatch waits for it. */
++   if (kk_cmd_land_ts_resolves(cmd))
++      mtl_barrier_after_queue_stages(cs_get_compute(cmd), MTL_STAGE_BLIT,
++                                     MTL_STAGE_DISPATCH);
+ 
+    emit_zero_queries(cmd, pool, firstQuery, queryCount, false);
+ }
+@@ -732,8 +734,7 @@
+    /* Timestamp results are resolved into the pool BO on a deferred command
+     * buffer; make sure any pending resolve lands before this copy reads it.
+     * This also gives VK_QUERY_RESULT_WAIT_BIT its meaning for timestamps. */
+-   if (util_dynarray_num_elements(&cmd->ts_resolves, struct kk_ts_resolve) > 0)
+-      cs_end(cmd);
++   kk_cmd_land_ts_resolves(cmd);
+ 
+    mtl_compute_encoder *encoder = cs_get_compute(cmd);
+    /* The resolveCounterHeap runs on the blit stage and it needs to be available

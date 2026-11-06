@@ -1065,7 +1065,9 @@ static int run_gaps(const char *variant, int n, int frames, int iters, int group
  * into slots 0-1; q0, q1 written again around dispatch B (twice the iterations; vkd3d-proton resets a query
  * written twice in a list inside the list), resolved into slots 2-3; then q2 before and q3 after a draw, q3 inside
  * the render pass, resolved into slots 4-5. Checks every frame: all values nonzero, t1 > t0, t2 >= t1, t3 > t2,
- * t5 > t4, and B / A between 1.5 and 2.5; prints the medians. */
+ * t5 > t4, and t0 later than the previous frame's t5 (fresh values, not left over); over all frames, the median
+ * B / A between 1.5 and 2.5 (per frame the GPU's timing jitters past those bounds now and then, with or without
+ * KK 0014, so the ratio is a check of the medians). Prints the medians. */
 static int run_tscheck(int frames, int iters)
 {
     char its[16];
@@ -1130,6 +1132,7 @@ static int run_tscheck(int frames, int iters)
     double *da = calloc(frames, sizeof(double)), *db = calloc(frames, sizeof(double)),
            *dg = calloc(frames, sizeof(double)), *dd = calloc(frames, sizeof(double));
     int bad = 0;
+    UINT64 prev_end = 0;
     for (int f = 0; f < frames; f++) {
         ID3D12CommandAllocator_Reset(ca);
         ID3D12GraphicsCommandList_Reset(c, ca, ca_ps);
@@ -1165,7 +1168,8 @@ static int run_tscheck(int frames, int iters)
         D3D12_RANGE r = { 0, 48 };
         ID3D12Resource_Map(rb, 0, &r, (void **)&t);
         const int ok = t[0] && t[1] && t[2] && t[3] && t[4] && t[5] && t[1] > t[0] && t[2] >= t[1] && t[3] > t[2] &&
-                       t[5] > t[4] && (t[3] - t[2]) * 2 >= (t[1] - t[0]) * 3 && (t[3] - t[2]) * 2 <= (t[1] - t[0]) * 5;
+                       t[5] > t[4] && t[0] > prev_end;
+        prev_end = t[5];
         if (!ok && bad++ < 5)
             printf("frame %d: %llu %llu %llu %llu %llu %llu\n", f, (unsigned long long)t[0], (unsigned long long)t[1],
                    (unsigned long long)t[2], (unsigned long long)t[3], (unsigned long long)t[4], (unsigned long long)t[5]);
@@ -1182,8 +1186,11 @@ static int run_tscheck(int frames, int iters)
     printf("tscheck frames=%d iters=%d: dispatch A median %.1f us, B median %.1f us (B/A %.2f), A end to B start "
            "median %.1f us, draw median %.1f us\n", frames, iters, da[frames / 2], db[frames / 2],
            db[frames / 2] / da[frames / 2], dg[frames / 2], dd[frames / 2]);
-    printf("tscheck %s (%d of %d frames failed)\n", bad ? "FAIL" : "PASS", bad, frames);
-    return bad ? 1 : 0;
+    const double ratio = db[frames / 2] / da[frames / 2];
+    const int ratio_ok = ratio >= 1.5 && ratio <= 2.5;
+    printf("tscheck %s (%d of %d frames with bad values; median B/A %.2f %s)\n", bad || !ratio_ok ? "FAIL" : "PASS",
+           bad, frames, ratio, ratio_ok ? "in 1.5-2.5" : "OUT of 1.5-2.5");
+    return bad || !ratio_ok ? 1 : 0;
 }
 
 int main(int argc, char **argv)

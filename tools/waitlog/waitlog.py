@@ -23,6 +23,7 @@ SIGNALS = {10, 11, 12, 13}
 HINTS = {0: 'NtWaitForAlertByThreadId', 1: 'WaitOnAddress', 2: 'critical section', 3: 'SRW exclusive', 4: 'SRW shared',
          5: 'condition variable', 6: 'barrier'}
 F_COUNT, F_ALL, F_ALERTABLE, F_TIMEOUT, F_POLL, F_NOBLOCK, F_OPEN = 0x7f, 0x80, 0x100, 0x200, 0x400, 0x800, 0x1000
+F_INPROC = 0x2000  # Wine 0067: done in process by msync (0064), no wineserver request, so no waker
 STATUS = {0: 'ok', 0x101: 'alerted', 0x102: 'timeout', 0x103: 'pending', 0xc0: 'user_apc', 0x80: 'abandoned'}
 EV = struct.Struct('<QQQIIIHH')
 
@@ -192,9 +193,10 @@ def main():
         '%.1f' % cpu[focus] if focus in cpu else '?'))
     by = collections.defaultdict(list)
     for s, e, obj, tid, waker, status, kind, flags in mine:
-        wt, how = (None, 'still waiting when the window ended') if flags & F_OPEN else waker_of(kind, waker)
+        wt, how = (None, 'still waiting when the window ended') if flags & F_OPEN else \
+            (None, 'msync: waker not recorded') if flags & F_INPROC else waker_of(kind, waker)
         if status == 0x102: how = 'timeout'
-        key = (path_of(kind, obj), tname(wt), how)
+        key = (path_of(kind, obj) if not flags & F_INPROC else 'msync', tname(wt), how)
         by[key].append(clip(s, e))
     print('  who ended its waits (by total time):')
     print('  %-32s %-24s %-30s %7s %9s %8s %8s %8s %8s' % ('path', 'waker', 'how', 'count', 'total ms', 'mean', 'p50', 'p95', 'max'))
@@ -231,7 +233,7 @@ def main():
     if a.events:
         print('\nfocus thread events:')
         for s, e, obj, tid, waker, status, kind, flags in sorted(ev for ev in events if ev[3] == focus):
-            wt, how = waker_of(kind, waker) if kind in BLOCKING else (None, '')
+            wt, how = ((None, 'msync') if flags & F_INPROC else waker_of(kind, waker)) if kind in BLOCKING else (None, 'msync' if flags & F_INPROC else '')
             print('  %10.3f %-16s %9.3f ms obj=0x%x waker=%s %s status=%s flags=0x%x' % (
                 ns(s - t0) / 1e6, KINDS.get(kind, kind), ns(e - s) / 1e6, obj, tname(wt), how,
                 STATUS.get(status, '0x%x' % status), flags))
@@ -255,6 +257,7 @@ def check_roles(path, events, labels, cpu, per, win_ms, clip):
         wk = collections.Counter()
         for s, e, obj, t, waker, status, kind, flags in mine:
             if status == 0x102 or flags & F_OPEN: continue  # a timeout has no waker, a wait open at the end none yet
+            if flags & F_INPROC: wk[(None, 'msync', 'msync')] += 1; continue  # no waker to check
             w, how = waker_of(kind, waker)
             wk[(labels.get(w, w), how, path_of(kind, obj))] += 1
         return mine, wk
@@ -272,6 +275,9 @@ def check_roles(path, events, labels, cpu, per, win_ms, clip):
                                       ('S2', 'S1', 'alert', 'alert: SRW exclusive', None)]:
         mine, wk = stat(role)
         tot = sum(wk.values())
+        if path == 'server' and wk[(None, 'msync', 'msync')] > tot / 2:
+            # msync (Wine 0064/0067): the event wait is done in process, recorded without a waker
+            waker, how, path = None, 'msync', 'msync'
         good = wk[(waker, how, path)]
         frac = good / tot if tot else 0
         cnt_ok = n is None or abs(tot - n) <= max(3, 0.1 * n)

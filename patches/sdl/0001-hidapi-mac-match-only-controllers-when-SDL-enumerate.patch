@@ -1,0 +1,192 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: jason chien <3936511+jason5545@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 13:02:23 +0800
+Subject: [PATCH] hidapi/mac: match only controllers when SDL enumerates only
+ controllers
+
+With SDL_HINT_HIDAPI_ENUMERATE_ONLY_CONTROLLERS on (the default), an
+enumeration of every device set the IOHIDManager's matching to NULL, so the
+manager created an IOHIDDevice, and opened a user client, for every HID
+service on the machine (keyboard, trackpad, motion and light sensors), and
+SDL_HIDAPI_ShouldIgnoreDevice() dropped all but the controllers afterwards.
+The discovery thread asks for that enumeration whenever any HID service is
+published or terminated, and init_hid_manager() did the same once.
+
+On macOS 27.2 (26B123) on an M5 (Mac17,6) the kernel panicked in that path,
+a kernel tag check fault (a use after free caught by MTE): winebus's SDL
+thread, SDL_WaitEventTimeout -> HIDAPI_JoystickDetect ->
+PLATFORM_hid_enumerate -> IOHIDManagerSetDeviceMatchingMultiple ->
+IOHIDDeviceCreate -> IOCreatePlugInInterfaceForService ->
+IOConnectSetCFProperties -> kernel.
+
+Match up front what SDL_HIDAPI_ShouldIgnoreDevice() keeps: Generic Desktop
+joysticks, gamepads and multi-axis controllers (kIOHIDDeviceUsagePageKey
+matches any of a device's usage pairs, as the filter looks at all of them),
+Valve's devices and Flydigi's gamepads. A vendor/product enumeration and the
+hint turned off still match as before.
+---
+ src/hidapi/SDL_hidapi.c |  11 ++++
+ src/hidapi/mac/hid.c    | 108 ++++++++++++++++++++++++++++++++--------
+ 2 files changed, 98 insertions(+), 21 deletions(-)
+
+diff --git a/src/hidapi/SDL_hidapi.c b/src/hidapi/SDL_hidapi.c
+index 5df9ae5..9e52a38 100644
+--- a/src/hidapi/SDL_hidapi.c
++++ b/src/hidapi/SDL_hidapi.c
+@@ -547,6 +547,10 @@ static void HIDAPI_ShutdownDiscovery(void)
+ #define HIDAPI_USING_SDL_RUNTIME
+ #define HIDAPI_IGNORE_DEVICE(BUS, VID, PID, USAGE_PAGE, USAGE, LIBUSB, LIBUSB_XBOX) \
+         SDL_HIDAPI_ShouldIgnoreDevice(BUS, VID, PID, USAGE_PAGE, USAGE, LIBUSB, LIBUSB_XBOX)
++#ifdef SDL_PLATFORM_MACOS
++static bool SDL_HIDAPI_EnumerateOnlyControllers(void);
++#define HIDAPI_ENUMERATE_ONLY_CONTROLLERS() SDL_HIDAPI_EnumerateOnlyControllers()
++#endif
+ 
+ struct PLATFORM_hid_device_;
+ typedef struct PLATFORM_hid_device_ PLATFORM_hid_device;
+@@ -1131,6 +1135,13 @@ static void SDLCALL OnlyControllersChanged(void *userdata, const char *name, con
+     SDL_hidapi_only_controllers = SDL_GetStringBoolean(hint, true);
+ }
+ 
++#ifdef SDL_PLATFORM_MACOS
++static bool SDL_HIDAPI_EnumerateOnlyControllers(void)
++{
++    return SDL_hidapi_only_controllers;
++}
++#endif
++
+ static void SDLCALL IgnoredDevicesChanged(void *userdata, const char *name, const char *oldValue, const char *hint)
+ {
+     SDL_free(SDL_hidapi_ignored_devices);
+diff --git a/src/hidapi/mac/hid.c b/src/hidapi/mac/hid.c
+index 95c387a..8b94bf2 100644
+--- a/src/hidapi/mac/hid.c
++++ b/src/hidapi/mac/hid.c
+@@ -443,13 +443,98 @@ static wchar_t *dup_wcs(const wchar_t *s)
+ 	return ret;
+ }
+ 
++#ifdef HIDAPI_ENUMERATE_ONLY_CONTROLLERS
++static void add_controller_match(CFMutableArrayRef array, int32_t usage_page, int32_t usage, int32_t vendor_id, int32_t product_id)
++{
++	CFMutableDictionaryRef dict = CFDictionaryCreateMutable(kCFAllocatorDefault, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
++	if (!dict) {
++		return;
++	}
++	const struct { CFStringRef key; int32_t value; } keys[] = {
++		{ CFSTR(kIOHIDDeviceUsagePageKey), usage_page },
++		{ CFSTR(kIOHIDDeviceUsageKey), usage },
++		{ CFSTR(kIOHIDVendorIDKey), vendor_id },
++		{ CFSTR(kIOHIDProductIDKey), product_id },
++	};
++	for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
++		if (keys[i].value) {
++			CFNumberRef n = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &keys[i].value);
++			if (n) {
++				CFDictionarySetValue(dict, keys[i].key, n);
++				CFRelease(n);
++			}
++		}
++	}
++	CFArrayAppendValue(array, dict);
++	CFRelease(dict);
++}
++
++/* Matching for an enumeration of every device while SDL enumerates only controllers: the
++   devices SDL_HIDAPI_ShouldIgnoreDevice() keeps, Generic Desktop joysticks, gamepads and
++   multi-axis controllers (any usage pair, as kIOHIDDeviceUsagePageKey matches them all),
++   Valve's devices and Flydigi's gamepads. Matching every device made the manager create an
++   IOHIDDevice, and open a user client, for each HID service on the machine (the keyboard,
++   the trackpad, the motion and light sensors) on every enumeration, and SDL enumerates again
++   whenever any HID service comes or goes. The kernel can panic in that path: on macOS 27.2
++   on an M5, a kernel tag check fault (a use after free) in IOConnectSetCFProperties from
++   IOHIDDeviceCreate under IOHIDManagerSetDeviceMatching. */
++static CFArrayRef create_controller_matching(void)
++{
++	CFMutableArrayRef array = CFArrayCreateMutable(kCFAllocatorDefault, 0, &kCFTypeArrayCallBacks);
++	if (!array) {
++		return NULL;
++	}
++	add_controller_match(array, USB_USAGEPAGE_GENERIC_DESKTOP, USB_USAGE_GENERIC_JOYSTICK, 0, 0);
++	add_controller_match(array, USB_USAGEPAGE_GENERIC_DESKTOP, USB_USAGE_GENERIC_GAMEPAD, 0, 0);
++	add_controller_match(array, USB_USAGEPAGE_GENERIC_DESKTOP, USB_USAGE_GENERIC_MULTIAXISCONTROLLER, 0, 0);
++	add_controller_match(array, 0, 0, USB_VENDOR_VALVE, 0);
++	add_controller_match(array, 0, 0, USB_VENDOR_FLYDIGI_V1, USB_PRODUCT_FLYDIGI_V1_GAMEPAD);
++	add_controller_match(array, 0, 0, USB_VENDOR_FLYDIGI_V2, 0);
++	return array;
++}
++#endif /* HIDAPI_ENUMERATE_ONLY_CONTROLLERS */
++
++static void set_device_matching(unsigned short vendor_id, unsigned short product_id)
++{
++	CFMutableDictionaryRef matching = NULL;
++	if (vendor_id != 0 || product_id != 0) {
++		matching = CFDictionaryCreateMutable(kCFAllocatorDefault, kIOHIDOptionsTypeNone, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
++
++		if (matching && vendor_id != 0) {
++			CFNumberRef v = CFNumberCreate(kCFAllocatorDefault, kCFNumberShortType, &vendor_id);
++			CFDictionarySetValue(matching, CFSTR(kIOHIDVendorIDKey), v);
++			CFRelease(v);
++		}
++
++		if (matching && product_id != 0) {
++			CFNumberRef p = CFNumberCreate(kCFAllocatorDefault, kCFNumberShortType, &product_id);
++			CFDictionarySetValue(matching, CFSTR(kIOHIDProductIDKey), p);
++			CFRelease(p);
++		}
++	}
++#ifdef HIDAPI_ENUMERATE_ONLY_CONTROLLERS
++	else if (HIDAPI_ENUMERATE_ONLY_CONTROLLERS()) {
++		CFArrayRef multiple = create_controller_matching();
++		if (multiple) {
++			IOHIDManagerSetDeviceMatchingMultiple(hid_mgr, multiple);
++			CFRelease(multiple);
++			return;
++		}
++	}
++#endif
++	IOHIDManagerSetDeviceMatching(hid_mgr, matching);
++	if (matching != NULL) {
++		CFRelease(matching);
++	}
++}
++
+ /* Initialize the IOHIDManager. Return 0 for success and -1 for failure. */
+ static int init_hid_manager(void)
+ {
+ 	/* Initialize all the HID Manager Objects */
+ 	hid_mgr = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone);
+ 	if (hid_mgr) {
+-		IOHIDManagerSetDeviceMatching(hid_mgr, NULL);
++		set_device_matching(0, 0);
+ 		IOHIDManagerScheduleWithRunLoop(hid_mgr, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
+ 		return 0;
+ 	}
+@@ -766,26 +851,7 @@ struct hid_device_info  HID_API_EXPORT *hid_enumerate(unsigned short vendor_id,
+ 	process_pending_events();
+ 
+ 	/* Get a list of the Devices */
+-	CFMutableDictionaryRef matching = NULL;
+-	if (vendor_id != 0 || product_id != 0) {
+-		matching = CFDictionaryCreateMutable(kCFAllocatorDefault, kIOHIDOptionsTypeNone, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+-
+-		if (matching && vendor_id != 0) {
+-			CFNumberRef v = CFNumberCreate(kCFAllocatorDefault, kCFNumberShortType, &vendor_id);
+-			CFDictionarySetValue(matching, CFSTR(kIOHIDVendorIDKey), v);
+-			CFRelease(v);
+-		}
+-
+-		if (matching && product_id != 0) {
+-			CFNumberRef p = CFNumberCreate(kCFAllocatorDefault, kCFNumberShortType, &product_id);
+-			CFDictionarySetValue(matching, CFSTR(kIOHIDProductIDKey), p);
+-			CFRelease(p);
+-		}
+-	}
+-	IOHIDManagerSetDeviceMatching(hid_mgr, matching);
+-	if (matching != NULL) {
+-		CFRelease(matching);
+-	}
++	set_device_matching(vendor_id, product_id);
+ 
+ 	CFSetRef device_set = IOHIDManagerCopyDevices(hid_mgr);
+ 

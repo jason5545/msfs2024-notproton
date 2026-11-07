@@ -31,7 +31,7 @@
 |---|---|
 | Mac | M5 Max（40 核 GPU）、128 GB、macOS 27.2 |
 | Squark（app） | [`jason5545/squark-app`](https://github.com/jason5545/squark-app) 分支 `steamac`：Hadron 上游 `87c4265` 加我們的改動，11/4 從 Hadron 改名。Squark 1.0.3，Sparkle 自動更新關掉 |
-| Wine runtime | `wine-11.21-highball`（11/7 起）：WineHQ 11.21，加 Hadron 的 patch 0001–0003、0005，Highball `patches-arm64` 0018–0052（highball-engine `2eedc50`，從 11.18 搬過來，0031、0036、0045 配合 11.21 改寫），我們的 0004、0053–0063；runtime 帶 Homebrew 的 sdl2-compat＋SDL3，winebus 走 SDL（照 Highball）。之前的 `wine-11.18-fex` 留著可以退回 |
+| Wine runtime | `wine-11.21-highball`（11/7 起）：WineHQ 11.21，加 Hadron 的 patch 0001–0003、0005，Highball `patches-arm64` 0018–0052（highball-engine `2eedc50`，從 11.18 搬過來，0031、0036、0045 配合 11.21 改寫），我們的 0004、0053–0063；runtime 帶 Homebrew 的 sdl2-compat 和我們編的 SDL3（Homebrew 同版本加 `patches/sdl`，列舉時只打開手把），winebus 走 SDL（照 Highball）。之前的 `wine-11.18-fex` 留著可以退回 |
 | FEX | FEX-2610 加 Highball `fex/patches` 0001–0033，unix 端是 Highball 的 `fexunixlib_darwin.cpp`（每條執行緒都開硬體 TSO）。我們的 0035–0038（以 FBW A380 基準最佳化，說明在 fork 的 `runtime/fex/highball/README.md`）11/4 裝進模擬器用的 runtime 和模擬器 prefix；0037 由 MSFS 配方對 `\wasm\msfs2024\` 開；0039（入口不再存區塊 header，MD-11 回放 −6% 週期）11/4 傍晚也裝進去了；0040（區塊失效時入口改成交回 dispatcher，修掉 JSC 開 JIT 時偶爾跑到改寫前的翻譯而崩潰，`SQUARK_FEX_STALE_EXIT=0` 關掉）11/5 裝進去 |
 | 圖形 | KosmicKrisp（Mesa `ce576c29ed` 加 fxgl/steamac v1.9.7 的 0001–0077，再加 [`patches/kk/`](patches/kk/)）；vkd3d-proton `21a49c97`（v3.0b）、DXVK `3cb664e1`（v2.6.2-23）加 [`patches/vkd3d-proton/`](patches/vkd3d-proton/)、[`patches/dxvk/`](patches/dxvk/)，編成 ARM64EC |
 | 其他 | GStreamer 1.28.7（官方 framework，用 Highball 的腳本精簡；沒有它開始畫面會一直黑） |

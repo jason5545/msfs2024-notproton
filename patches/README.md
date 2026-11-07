@@ -34,6 +34,14 @@
 
 Metal 只對「透過帶 `raster_order_group` 屬性的參數」做的存取保證順序；從普通位址轉型拿到的貼圖 handle 或結構成員，屬性不會生效（M5 Max 實測：N 個重疊片段各做一次讀出加一寫回，只有經過參數的才剛好等於 N）。
 
+## sdl/
+
+套在 SDL `release-3.4.20`（`f00dc91`，Homebrew 11/7 的版本）上，`tools/sdl-build/build-sdl.sh` 每次把原始碼樹重設回 tag 再套一次，編好的 `libSDL3.0.dylib` 放 `~/GitHub/msfs-src/sdl/stage/`，`tools/hadron/build-runtime.sh` 用 `HADRON_SDL3` 換掉 Homebrew 的 SDL3（sdl2-compat 照舊用 Homebrew 的）。
+
+| 檔案 | 內容 |
+|---|---|
+| `0001-hidapi-mac-match-only-controllers…` | 我們的。SDL 預設只列舉手把（`SDL_HINT_HIDAPI_ENUMERATE_ONLY_CONTROLLERS`），但 mac 的 hidapi 原本用 NULL 比對：IOHIDManager 每次列舉都替機器上每個 HID 裝置（鍵盤、觸控板、加速度計、光感……，這台 18 個）建一個 IOHIDDevice、開一次 user client，列完才丟掉不是手把的。SDL 只要有任何 HID 裝置出現或消失就重新列舉。11/7 12:50 核心在這條路上 panic（MTE 抓到 use-after-free，`IOConnectSetCFProperties` ← `IOHIDDeviceCreate` ← `IOHIDManagerSetDeviceMatchingMultiple`，winedevice 的 SDL 執行緒）。改成一開始就只比對過濾會留下的那些：Generic Desktop 的 Joystick、GamePad、MultiAxis（任一組 usage 都算），加上 Valve、Flydigi。這台每次列舉建的裝置 18 → 0；hint 關掉、指定 VID／PID 的列舉照舊 |
+
 ## fex/
 
 依序套在上游 FEX main `02e24ca5c`，結果等於 fork 分支 `steamac-darwin` 的 `995db7b36`。

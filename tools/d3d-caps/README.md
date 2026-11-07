@@ -6,6 +6,7 @@
 - `mst_gpu.py <trace> [pid]`：把 Instruments 的 Metal System Trace（`xcrun xctrace record --template 'Metal System Trace' --attach <pid>`）換成每幀 GPU 毫秒。
 - `mst_gaps.py <metal-gpu-intervals.xml> <pid> [present 次數]`：從 Metal System Trace 匯出的 GPU intervals 算一個程序的 GPU 空檔：大小分布、各段佔空檔多少、空檔前後的 command buffer 編號有沒有變（在 command buffer 之間還是裡面；KK 用 MTL4，編號會重複用，只能比相鄰兩個），以及 command buffer 內部 40–160 µs 空檔前後的 encoder 類型（紀錄 25.58）。
 - `mst_encgaps.py <metal-gpu-intervals.xml> <pid> [幀數]`：同一份 intervals，看空檔裡夾了什麼（紀錄 25.59）。每段空檔大小列出前後 encoder 編號跳幾號：同一個 command buffer 裡相鄰的 encoder 編號連號，跳 2 以上表示中間有沒留下區間的東西（KosmicKrisp 的 timestamp counter heap resolve 就是）；40–160 µs 的空檔再按前後區間分類：前面是小 Compute（< 6 µs，像 KK 寫 timestamp 前的 `write_u32`）、後面是 Vertex（list 開頭的 timestamp，`patches/kk/0014` 省得掉），或後面是 command buffer 最後一個小 Compute（list 結尾 resolve 完的 query copy，省不掉）。
+- `tp_stacks.py <time-profile.xml> <pid> <執行緒名稱的一段> [sym]`、`tp_callers.py <xml> <pid> <執行緒> <符號的一段> [n]`、`tp_sum.py <xml> <pid> <符號…>`：讀 `tp_threads.py` 匯出的 Time Profiler 表（紀錄 25.72）。`tp_stacks` 印一條執行緒的葉節點所在模組、包含式的模組和符號（Mach-O 的 Wine unix 端、KosmicKrisp、Metal 有符號；PE 和 FEX 翻譯碼沒有，算在 NOBIN）；`tp_callers` 印含某個符號的樣本往外 7 層的呼叫鏈；`tp_sum` 印整個程序裡含某個符號的毫秒數、其中有多少是 `__kdebug_trace`（Metal Application instrument 自己的成本，不錄時沒有）、前幾條執行緒。
 
 跑法照 `compat_run.sh` 選 vkd3d 時的環境，用 `tools/hadron/run.sh` 在一次性 prefix 跑：
 

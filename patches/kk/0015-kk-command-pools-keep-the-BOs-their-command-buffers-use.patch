@@ -1,0 +1,201 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: jason chien <3936511+jason5545@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 14:20:00 +0800
+Subject: [PATCH 15/15] kk: command pools keep the BOs their command buffers
+ use
+
+A command pool kept at most 33 free upload BOs. Through vkd3d-proton every
+D3D12 command list takes a command buffer and, for its query resets, an init
+command buffer, each with a 128 KiB BO at its first upload. An allocator
+that records more than about 16 lists between resets therefore destroyed the
+surplus at every vkFreeCommandBuffers (ID3D12CommandAllocator::Reset) and
+created it again while the next lists were recorded: a Metal heap and a
+buffer each time, added to and removed from the residency set, and the next
+submission's residency commit applying both. MSFS 2024 records about 129
+lists a frame, each bracketed by two timestamps (records 25.64). In a
+5-second Time Profiler recording on the runway (records 25.72), not counting
+the recorder's own kdebug calls: about 360 ms creating BOs (the render
+thread, under vkCmdResetQueryPool and vkCmdWriteTimestamp2), 34 ms
+destroying them on the main thread, 118 ms of heap deallocation and a part
+of 311 ms of residency commits on the submission thread, for 128 frames.
+
+A pool now keeps as many free BOs as its command buffers had in use at once
+since its last vkResetCommandPool, at least 32 as before and at most 1024
+(128 MiB). vkResetCommandPool lets go of the rest, so a burst does not hold
+its BOs for good; vkTrimCommandPool still frees them all. The pool also
+initializes its free count at creation (vk_alloc2 does not zero it) and
+clears it when trimmed. MESA_KK_CMD_POOL_FIXED_CAP=1 keeps the old cap.
+
+tools/gpu-bench d3d12gpu cpool (records 25.72), M5 Max, 3 rounds
+alternating, per frame medians: 128 lists from one allocator, allocator
+reset 2.43 -> 0.33 ms, recording 5.78 -> 3.55 ms, process CPU 18.1 -> 13.9
+ms; 128 lists from 4 allocators, recording 4.55 -> 3.27 ms, CPU 15.8 -> 13.1
+ms; 128 lists from 16 allocators (8 each, under the old cap) unchanged; with
+MESA_KK_CMD_POOL_FIXED_CAP=1 as before. All resolved timestamps valid,
+tscheck and the gaps checksums unchanged, process footprint +5 to +43 MB of
+1.9 GB and steady.
+
+Applies after 0014.
+---
+--- a/src/kosmickrisp/vulkan/kk_cmd_pool.h
++++ b/src/kosmickrisp/vulkan/kk_cmd_pool.h
+@@ -15,7 +15,11 @@
+ #include "util/u_dynarray.h"
+ 
+ #define KK_CMD_BO_SIZE     (1024 * 128)
+-#define KK_CMD_POOL_BO_MAX 32
++/* Free BOs a pool always keeps. It keeps more while its command buffers use
++ * more: up to the most it had in use at once since the last reset of the pool
++ * (see kk_ResetCommandPool), never more than KK_CMD_POOL_BO_LIMIT. */
++#define KK_CMD_POOL_BO_MAX   32
++#define KK_CMD_POOL_BO_LIMIT 1024
+ 
+ /* Recyclable command buffer BO, used for both push buffers and upload */
+ struct kk_cmd_bo {
+@@ -32,6 +36,13 @@
+    struct list_head free_bos;
+    uint32_t num_free_bos;
+ 
++   /** BOs of this pool, free or in a command buffer */
++   uint32_t num_bos;
++   /** Most BOs in command buffers at once since the last pool reset */
++   uint32_t peak_used_bos;
++   /** Free BOs kept when command buffers give theirs back */
++   uint32_t keep_free_bos;
++
+    struct {
+       struct util_dynarray free_allocators;
+       struct util_dynarray free_cmd_bufs;
+--- a/src/kosmickrisp/vulkan/kk_cmd_pool.c
++++ b/src/kosmickrisp/vulkan/kk_cmd_pool.c
+@@ -15,6 +15,18 @@
+ 
+ #include "vk_common_entrypoints.h"
+ 
++#include "util/u_debug.h"
++
++/* MESA_KK_CMD_POOL_FIXED_CAP=1: keep at most KK_CMD_POOL_BO_MAX free BOs per
++ * pool, as before. A pool whose command buffers use more BOs between resets
++ * (vkd3d-proton: every D3D12 command list takes a command buffer and, for its
++ * query resets, an init command buffer, each with a BO at its first upload)
++ * then destroys the surplus at every vkFreeCommandBuffers and creates it again
++ * while recording the next ones: a Metal heap and buffer each time, added to
++ * and removed from the residency set. */
++DEBUG_GET_ONCE_BOOL_OPTION(kk_cmd_pool_fixed_cap, "MESA_KK_CMD_POOL_FIXED_CAP",
++                           false)
++
+ static VkResult
+ kk_cmd_bo_create(struct kk_cmd_pool *pool, struct kk_cmd_bo **bo_out)
+ {
+@@ -32,6 +44,7 @@
+       return vk_error(pool, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+    }
+ 
++   pool->num_bos++;
+    *bo_out = bo;
+    return VK_SUCCESS;
+ }
+@@ -42,15 +55,30 @@
+    struct kk_device *dev = kk_cmd_pool_device(pool);
+    kk_destroy_bo(dev, bo->bo);
+    vk_free(&pool->vk.alloc, bo);
++   pool->num_bos--;
+ }
+ 
++/* Destroys free BOs past keep */
+ static void
++kk_cmd_pool_trim_free_bos(struct kk_cmd_pool *pool, uint32_t keep)
++{
++   while (pool->num_free_bos > keep) {
++      struct kk_cmd_bo *bo =
++         list_last_entry(&pool->free_bos, struct kk_cmd_bo, link);
++      list_del(&bo->link);
++      pool->num_free_bos--;
++      kk_cmd_bo_destroy(pool, bo);
++   }
++}
++
++static void
+ kk_cmd_pool_destroy_bos(struct kk_cmd_pool *pool)
+ {
+    list_for_each_entry_safe(struct kk_cmd_bo, bo, &pool->free_bos, link)
+       kk_cmd_bo_destroy(pool, bo);
+ 
+    list_inithead(&pool->free_bos);
++   pool->num_free_bos = 0;
+ }
+ 
+ VkResult
+@@ -65,18 +93,30 @@
+    if (bo) {
+       list_del(&bo->link);
+       *bo_out = bo;
+-      return VK_SUCCESS;
++   } else {
++      const VkResult result = kk_cmd_bo_create(pool, bo_out);
++      if (result != VK_SUCCESS)
++         return result;
+    }
+ 
+-   return kk_cmd_bo_create(pool, bo_out);
++   pool->peak_used_bos =
++      MAX2(pool->peak_used_bos, pool->num_bos - pool->num_free_bos);
++   pool->keep_free_bos = MAX2(pool->keep_free_bos, pool->peak_used_bos);
++   return VK_SUCCESS;
+ }
+ 
+ void
+ kk_cmd_pool_free_bo_list(struct kk_cmd_pool *pool, struct list_head *bos)
+ {
++   const uint32_t keep =
++      debug_get_option_kk_cmd_pool_fixed_cap()
++         ? KK_CMD_POOL_BO_MAX
++         : MIN2(MAX2(pool->keep_free_bos, KK_CMD_POOL_BO_MAX),
++                KK_CMD_POOL_BO_LIMIT);
++
+    list_for_each_entry_safe(struct kk_cmd_bo, bo, bos, link) {
+       list_del(&bo->link);
+-      if (pool->num_free_bos > KK_CMD_POOL_BO_MAX) {
++      if (pool->num_free_bos > keep) {
+          kk_cmd_bo_destroy(pool, bo);
+       } else {
+          list_addtail(&bo->link, &pool->free_bos);
+@@ -148,6 +188,10 @@
+    pool->metal.free_cmd_bufs = UTIL_DYNARRAY_INIT;
+ 
+    list_inithead(&pool->free_bos);
++   pool->num_free_bos = 0;
++   pool->num_bos = 0;
++   pool->peak_used_bos = 0;
++   pool->keep_free_bos = 0;
+ 
+    *pCmdPool = kk_cmd_pool_to_handle(pool);
+ 
+@@ -202,6 +246,18 @@
+       kk_cmd_pool_release_mtl_objects(pool);
+    }
+ 
++   /* The command buffers gave their BOs back. Keep as many as were in use at
++    * once since the last reset, which the next round of the same work takes
++    * again, and let go of the rest: a burst does not hold its BOs for good. */
++   if (!debug_get_option_kk_cmd_pool_fixed_cap()) {
++      const uint32_t used = pool->num_bos - pool->num_free_bos;
++      pool->keep_free_bos = pool->peak_used_bos;
++      pool->peak_used_bos = used;
++      kk_cmd_pool_trim_free_bos(
++         pool, MIN2(MAX2(pool->keep_free_bos, KK_CMD_POOL_BO_MAX),
++                    KK_CMD_POOL_BO_LIMIT));
++   }
++
+    return VK_SUCCESS;
+ }
+ 
+@@ -213,6 +269,8 @@
+ 
+    vk_command_pool_trim(&pool->vk, flags);
+    kk_cmd_pool_destroy_bos(pool);
++   pool->keep_free_bos = 0;
++   pool->peak_used_bos = pool->num_bos;
+ }
+ 
+ void

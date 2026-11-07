@@ -20,6 +20,8 @@
  *      A DIRECT and a COMPUTE queue submitting every frame (vkd3d-proton staggered submissions), see run_stagger.
  *   d3d12gpu gaps <nobar|uav|gfx|ts|tsgfx|tsdraw|lists|tslists|exec|tsresolve|tsrescs> [n] [frames] [iters] [groups]
  *      GPU idle between many tiny dispatches in one list or in many (records 25.59), see run_gaps.
+ *   d3d12gpu cpool [lists] [allocs] [frames] [draws]
+ *      Allocators that record many small timestamped lists a frame and are reset every frame (records 25.72).
  *   d3d12gpu tscheck [frames] [iters]
  *      Timestamp values through write, resolve, reset and write again in one list (records 25.59).
  *   d3d12gpu rtcast
@@ -1060,6 +1062,182 @@ static int run_gaps(const char *variant, int n, int frames, int iters, int group
     return 0;
 }
 
+/* cpool: command allocators that record many small timestamped lists a frame (records 25.72). MSFS 2024 records
+ * about 129 command lists a frame, each bracketed by two timestamps and resolved (census 25.64). Each frame slot
+ * (3 in flight) has <allocs> allocators; each frame, for each allocator: Reset (the game resets them on its main
+ * thread), then <lists> lists from it, each: timestamp, <draws> draws of one triangle with root constants,
+ * timestamp, ResolveQueryData of the two. One ExecuteCommandLists of all lists, Signal. Prints per frame medians
+ * of the time spent in the allocator Resets, in recording (list Reset .. Close), in ExecuteCommandLists, the
+ * frame's wall time; over the whole measured run, wall time and process CPU a frame (GetProcessTimes, all
+ * threads: vkd3d's submission thread does the Metal commits; Wine's counters tick in 10 ms). A checksum of the resolved timestamps' validity (every one nonzero, end > start). */
+#define CP_SLOTS 3
+#define CP_MAXL 1024
+static int cmp_dbl(const void *a, const void *b)
+{
+    double x = *(const double *)a, y = *(const double *)b;
+    return x < y ? -1 : x > y;
+}
+
+static double ft_ms(FILETIME a)
+{
+    return (double)(((ULONGLONG)a.dwHighDateTime << 32) | a.dwLowDateTime) / 1e4;
+}
+
+static double proc_cpu_ms(void)
+{
+    FILETIME c, e, k, u;
+    GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u);
+    return ft_ms(k) + ft_ms(u);
+}
+
+static int run_cpool(int lists, int allocs, int frames, int draws)
+{
+    const int nl = lists * allocs;
+    if (lists < 1 || allocs < 1 || nl > CP_MAXL || frames < 10 || draws < 0) {
+        printf("cpool: lists * allocs <= %d, frames >= 10\n", CP_MAXL);
+        return 2;
+    }
+    char its[16];
+    snprintf(its, sizeof(its), "%d", 1);
+    D3D_SHADER_MACRO defs[] = { { "ITERS", its }, { NULL, NULL } };
+    D3D12_ROOT_PARAMETER rp[1];
+    memset(rp, 0, sizeof(rp));
+    rp[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    rp[0].Constants.Num32BitValues = 2;
+    rp[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+    D3D12_ROOT_SIGNATURE_DESC rsd = { 1, rp, 0, NULL, 0 };
+    ID3D12RootSignature *rs = root_signature(&rsd);
+    ID3DBlob *vs = shader(vs_src, "vs_main", "vs_5_0", NULL);
+    ID3DBlob *ps = shader(gaps_src, "ps", "ps_5_0", defs);
+    const DXGI_FORMAT rtf = DXGI_FORMAT_R8G8B8A8_UNORM;
+    ID3D12PipelineState *gps = pso(rs, vs, ps, 1, &rtf, DXGI_FORMAT_UNKNOWN);
+    D3D12_HEAP_PROPERTIES hp = { D3D12_HEAP_TYPE_DEFAULT };
+    D3D12_RESOURCE_DESC rd = { D3D12_RESOURCE_DIMENSION_TEXTURE2D, 0, 64, 64, 1, 1, rtf, {1, 0},
+                               D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET };
+    ID3D12Resource *rt = NULL;
+    HRESULT hr = ID3D12Device_CreateCommittedResource(dev, &hp, 0, &rd, D3D12_RESOURCE_STATE_RENDER_TARGET, NULL,
+                                                      &IID_ID3D12Resource, (void **)&rt);
+    if (FAILED(hr)) die("CreateCommittedResource(rt)", hr);
+    ID3D12DescriptorHeap *rtv_heap = heap(D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 1, FALSE);
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv = cpu_handle(rtv_heap, 0);
+    ID3D12Device_CreateRenderTargetView(dev, rt, NULL, rtv);
+
+    const UINT qper = 2 * nl, nq = CP_SLOTS * qper;
+    D3D12_QUERY_HEAP_DESC qhd = { D3D12_QUERY_HEAP_TYPE_TIMESTAMP, nq, 0 };
+    ID3D12QueryHeap *qh = NULL;
+    hr = ID3D12Device_CreateQueryHeap(dev, &qhd, &IID_ID3D12QueryHeap, (void **)&qh);
+    if (FAILED(hr)) die("CreateQueryHeap", hr);
+    ID3D12Resource *rb = buffer(D3D12_HEAP_TYPE_READBACK, (UINT64)nq * 8, D3D12_RESOURCE_STATE_COPY_DEST);
+
+    static ID3D12GraphicsCommandList *cl[CP_SLOTS][CP_MAXL];
+    static ID3D12CommandAllocator *ca[CP_SLOTS][CP_MAXL];
+    for (int s = 0; s < CP_SLOTS; s++)
+        for (int a = 0; a < allocs; a++) {
+            hr = ID3D12Device_CreateCommandAllocator(dev, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                                     &IID_ID3D12CommandAllocator, (void **)&ca[s][a]);
+            if (FAILED(hr)) die("CreateCommandAllocator", hr);
+            for (int l = 0; l < lists; l++) {
+                ID3D12GraphicsCommandList **c = &cl[s][a * lists + l];
+                hr = ID3D12Device_CreateCommandList(dev, 0, D3D12_COMMAND_LIST_TYPE_DIRECT, ca[s][a], gps,
+                                                    &IID_ID3D12GraphicsCommandList, (void **)c);
+                if (FAILED(hr)) die("CreateCommandList", hr);
+                ID3D12GraphicsCommandList_Close(*c);
+            }
+        }
+    D3D12_VIEWPORT vp = { 0, 0, 64, 64, 0, 1 };
+    D3D12_RECT sc = { 0, 0, 64, 64 };
+    ID3D12Fence *fd = NULL;
+    ID3D12Device_CreateFence(dev, 0, 0, &IID_ID3D12Fence, (void **)&fd);
+    HANDLE ev = CreateEventA(NULL, FALSE, FALSE, NULL);
+    LARGE_INTEGER qpf;
+    QueryPerformanceFrequency(&qpf);
+#define CP_NOW(x) QueryPerformanceCounter(&x)
+#define CP_MS(a, b) ((double)((b).QuadPart - (a).QuadPart) * 1000.0 / (double)qpf.QuadPart)
+    const int warm = 30;
+    double *reset_ms = calloc(frames, sizeof(double)), *rec_ms = calloc(frames, sizeof(double));
+    double *exec_ms = calloc(frames, sizeof(double)), *frame_ms = calloc(frames, sizeof(double));
+    int n = 0, bad = 0;
+    double cpu0 = 0;
+    LARGE_INTEGER w0 = { 0 }, w1;
+    unsigned long long ok = 0;
+    LARGE_INTEGER fprev = { 0 };
+    for (int f = 1; f <= frames + warm; f++) {
+        const int s = f % CP_SLOTS;
+        if (f > CP_SLOTS) {
+            if (ID3D12Fence_GetCompletedValue(fd) < (UINT64)(f - CP_SLOTS)) {
+                ID3D12Fence_SetEventOnCompletion(fd, f - CP_SLOTS, ev);
+                WaitForSingleObject(ev, 30000);
+            }
+            UINT64 *t = NULL;
+            D3D12_RANGE r = { 0, (SIZE_T)nq * 8 };
+            ID3D12Resource_Map(rb, 0, &r, (void **)&t);
+            for (int q = 0; q < nl; q++) {
+                UINT64 a = t[s * qper + 2 * q], b = t[s * qper + 2 * q + 1];
+                if (a && b > a) ok++; else bad++;
+            }
+            ID3D12Resource_Unmap(rb, 0, NULL);
+        }
+        LARGE_INTEGER t0, t1, t2, t3;
+        CP_NOW(t0);
+        if (f == warm + 1) {
+            cpu0 = proc_cpu_ms();
+            w0 = t0;
+        }
+        for (int a = 0; a < allocs; a++)
+            ID3D12CommandAllocator_Reset(ca[s][a]);
+        CP_NOW(t1);
+        for (int l = 0; l < nl; l++) {
+            ID3D12GraphicsCommandList *c = cl[s][l];
+            const UINT q = s * qper + 2 * l;
+            ID3D12GraphicsCommandList_Reset(c, ca[s][l / lists], gps);
+            ID3D12GraphicsCommandList_SetGraphicsRootSignature(c, rs);
+            ID3D12GraphicsCommandList_OMSetRenderTargets(c, 1, &rtv, FALSE, NULL);
+            ID3D12GraphicsCommandList_RSSetViewports(c, 1, &vp);
+            ID3D12GraphicsCommandList_RSSetScissorRects(c, 1, &sc);
+            ID3D12GraphicsCommandList_IASetPrimitiveTopology(c, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            ID3D12GraphicsCommandList_EndQuery(c, qh, D3D12_QUERY_TYPE_TIMESTAMP, q);
+            for (int d = 0; d < draws; d++) {
+                UINT k[2] = { (UINT)(l * 31 + d), 0 };
+                ID3D12GraphicsCommandList_SetGraphicsRoot32BitConstants(c, 0, 2, k, 0);
+                ID3D12GraphicsCommandList_DrawInstanced(c, 3, 1, 0, 0);
+            }
+            ID3D12GraphicsCommandList_EndQuery(c, qh, D3D12_QUERY_TYPE_TIMESTAMP, q + 1);
+            ID3D12GraphicsCommandList_ResolveQueryData(c, qh, D3D12_QUERY_TYPE_TIMESTAMP, q, 2, rb, (UINT64)q * 8);
+            hr = ID3D12GraphicsCommandList_Close(c);
+            if (FAILED(hr)) die("Close", hr);
+        }
+        CP_NOW(t2);
+        ID3D12CommandQueue_ExecuteCommandLists(queue, nl, (ID3D12CommandList **)cl[s]);
+        ID3D12CommandQueue_Signal(queue, fd, f);
+        CP_NOW(t3);
+        if (f > warm) {
+            reset_ms[n] = CP_MS(t0, t1);
+            rec_ms[n] = CP_MS(t1, t2);
+            exec_ms[n] = CP_MS(t2, t3);
+            frame_ms[n] = CP_MS(fprev, t3);
+            n++;
+        }
+        fprev = t3;
+    }
+    ID3D12Fence_SetEventOnCompletion(fd, frames + warm, ev);
+    WaitForSingleObject(ev, 30000);
+    CP_NOW(w1);
+    const double cpu = (proc_cpu_ms() - cpu0) / n, wall = CP_MS(w0, w1) / n;
+    qsort(reset_ms, n, sizeof(double), cmp_dbl);
+    qsort(rec_ms, n, sizeof(double), cmp_dbl);
+    qsort(exec_ms, n, sizeof(double), cmp_dbl);
+    qsort(frame_ms, n, sizeof(double), cmp_dbl);
+    printf("cpool lists=%d allocs=%d frames=%d draws=%d (%d lists a frame)\n", lists, allocs, frames, draws, nl);
+    printf("per frame median ms: reset %.4f  record %.4f  execute %.4f  frame %.4f\n",
+           reset_ms[n / 2], rec_ms[n / 2], exec_ms[n / 2], frame_ms[n / 2]);
+    printf("per frame p90 ms:    reset %.4f  record %.4f  execute %.4f  frame %.4f\n",
+           reset_ms[n * 9 / 10], rec_ms[n * 9 / 10], exec_ms[n * 9 / 10], frame_ms[n * 9 / 10]);
+    printf("whole run per frame: wall %.4f ms  process CPU %.4f ms (%.2f cores)\n", wall, cpu, cpu / wall);
+    printf("per list: record %.2f us  frame %.2f us\n", 1000.0 * rec_ms[n / 2] / nl, 1000.0 * frame_ms[n / 2] / nl);
+    printf("timestamps ok %llu bad %d\n", ok, bad);
+    return bad ? 1 : 0;
+}
+
 /* tscheck: timestamp values through write, resolve (copy), reset and write again in one list (records 25.59).
  * Each frame, one list: timestamps q0, q1 around dispatch A (<iters> loop iterations, 64 groups), ResolveQueryData
  * into slots 0-1; q0, q1 written again around dispatch B (twice the iterations; vkd3d-proton resets a query
@@ -1197,7 +1375,7 @@ int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
     if (argc < 2) {
-        printf("usage: d3d12gpu cb [iters] | rt <format> [splits] [smooth|noise] | stagger [frames] [lists] [iters] [two|one] [reuse|fresh] | gaps <nobar|uav|gfx|ts|tsgfx|tsdraw|lists|tslists|exec|tsresolve|tsrescs> [n] [frames] [iters] [groups] | tscheck [frames] [iters]\n");
+        printf("usage: d3d12gpu cb [iters] | rt <format> [splits] [smooth|noise] | stagger [frames] [lists] [iters] [two|one] [reuse|fresh] | gaps <nobar|uav|gfx|ts|tsgfx|tsdraw|lists|tslists|exec|tsresolve|tsrescs> [n] [frames] [iters] [groups] | tscheck [frames] [iters] | cpool [lists] [allocs] [frames] [draws]\n");
         return 2;
     }
     HMODULE dc = LoadLibraryA("d3dcompiler_47.dll");
@@ -1234,9 +1412,12 @@ int main(int argc, char **argv)
                            argc > 6 && !strcmp(argv[6], "fresh"));
     if (!strcmp(argv[1], "tscheck"))
         return run_tscheck(argc > 2 ? atoi(argv[2]) : 50, argc > 3 ? atoi(argv[3]) : 20000);
+    if (!strcmp(argv[1], "cpool"))
+        return run_cpool(argc > 2 ? atoi(argv[2]) : 32, argc > 3 ? atoi(argv[3]) : 1, argc > 4 ? atoi(argv[4]) : 300,
+                         argc > 5 ? atoi(argv[5]) : 8);
     if (!strcmp(argv[1], "gaps") && argc > 2)
         return run_gaps(argv[2], argc > 3 ? atoi(argv[3]) : 64, argc > 4 ? atoi(argv[4]) : 500,
                         argc > 5 ? atoi(argv[5]) : 16, argc > 6 ? atoi(argv[6]) : 4);
-    printf("usage: d3d12gpu cb [iters] | rt <format> [splits] [smooth|noise] | stagger [frames] [lists] [iters] [two|one] [reuse|fresh] | gaps <nobar|uav|gfx|ts|tsgfx|tsdraw|lists|tslists|exec|tsresolve|tsrescs> [n] [frames] [iters] [groups] | tscheck [frames] [iters]\n");
+    printf("usage: d3d12gpu cb [iters] | rt <format> [splits] [smooth|noise] | stagger [frames] [lists] [iters] [two|one] [reuse|fresh] | gaps <nobar|uav|gfx|ts|tsgfx|tsdraw|lists|tslists|exec|tsresolve|tsrescs> [n] [frames] [iters] [groups] | tscheck [frames] [iters] | cpool [lists] [allocs] [frames] [draws]\n");
     return 2;
 }

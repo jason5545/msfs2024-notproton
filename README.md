@@ -19,6 +19,7 @@
 - 11/5 午休：MSFS 的 HTML／JS 儀表跑在 Coherent GT 的 JavaScriptCore 上，之前啟動選項帶 `JSC_useJIT=false`，JS 只走直譯器。開 JIT 時 FEX 偶爾會跑到 JSC 改寫前的舊翻譯而崩潰，修法是區塊失效時把入口改成交回 dispatcher（FEX patch 0040）。裝上修法、拿掉 `JSC_useJIT=false` 後，FBW A380X 停在 RCSS 28 駕駛艙從 21 FPS 變成 36–38 FPS，停了約 3 分鐘沒崩潰。一幀從 48 ms 降到 27 ms。下午驗收時發現午休那版在「另一條執行緒一直往程式碼旁邊寫資料」時會一直重新翻譯（Highball 的 `smcretire` 那段從 1 秒變 89 秒），改成「剛編好的區塊這一次直接進去」後回到原本的速度，14:1x 換進模擬器；回歸測試 25 項、`leatest`、`fault-test`、A380X 和 MD-11 的雜湊、24 個 JS 儀表的輸出都跟 0039 相同。
 - 11/5 晚上：量測局那一幕（A380X、RCSS、medium、夜間）GPU 每幀 30.9 ms、約 85–90% 忙，卡在 GPU。查到 KosmicKrisp 兩個多花的地方，都用自己寫的 D3D12 小程式離線量過（`tools/gpu-bench/`）：constant buffer 的越界檢查把每個 vec4 讀取拆成 4 個帶條件的讀取（`patches/kk/0012`，固定位移 22.0 → 17.0 ms），RGBA8 這類 render target 因為「可轉格式」的旗標被關掉無損壓縮（`patches/kk/0013` 加 vkd3d-proton 的開關，G-buffer pass 2.83 → 1.69 ms）。20:1x 換進模擬器用的 runtime，啟動選項加了開關，模擬器裡還沒量。
 - 11/6 早上：飛行中不是 GPU 牆，GPU 只忙約四成（25.57 的 trace）。兩項離線查過、改過：vkd3d-proton 的 staggered submissions 在只有一個 queue family 的 KosmicKrisp 上約七成五時間開著，關掉後雙 queue 的小提交快 8–16%，啟動選項加了 `VKD3D_CONFIG=no_staggered_submit`；command buffer 裡兩個小 encoder 之間約 100 µs 的停頓是 timestamp 的 counter heap resolve，`patches/kk/0014` 把它延到 command buffer 結尾（小程式每對 54.6 → 29.0 µs），09:0x 換進模擬器用的 runtime。模擬器裡這兩項推定只省幾 %，還沒量；最大的一塊是 command buffer 之間每幀約 11 ms 的空檔，正在查。
+- 11/7：模擬器換到 Wine 11.21（`wine-11.21-highball`）。上游 11.21 修掉了沒接手把的 XInput slot 每次都重新列舉裝置的問題，`XInputGetState` 每次從 0.55–0.6 ms 降到 20 µs。Highball 的 patch 從 11.18 搬過來，回歸測試、共享貼圖、錄檔重播都跟 11.18 一樣。Squark app 同時加了繁體中文介面，圖示改成不綁飛行的手把按鍵。
 
 ![TFDi MD-11F 在 RCSS 跑道頭的駕駛艙，PFD、ND、EICAS、MCDU 都有畫面](docs/img/md11-rcss-cockpit.jpg)
 
@@ -30,17 +31,17 @@
 |---|---|
 | Mac | M5 Max（40 核 GPU）、128 GB、macOS 27.2 |
 | Squark（app） | [`jason5545/squark-app`](https://github.com/jason5545/squark-app) 分支 `steamac`：Hadron 上游 `87c4265` 加我們的改動，11/4 從 Hadron 改名。Squark 1.0.3，Sparkle 自動更新關掉 |
-| Wine runtime | `wine-11.18-fex`：WineHQ 11.18，加 Hadron 的 patch 0001–0003、0005，Highball `patches-arm64` 0018–0052（highball-engine `2eedc50`），我們的 0004、0053–0060；runtime 帶 Homebrew 的 sdl2-compat＋SDL3，winebus 走 SDL（照 Highball） |
+| Wine runtime | `wine-11.21-highball`（11/7 起）：WineHQ 11.21，加 Hadron 的 patch 0001–0003、0005，Highball `patches-arm64` 0018–0052（highball-engine `2eedc50`，從 11.18 搬過來，0031、0036、0045 配合 11.21 改寫），我們的 0004、0053–0063；runtime 帶 Homebrew 的 sdl2-compat＋SDL3，winebus 走 SDL（照 Highball）。之前的 `wine-11.18-fex` 留著可以退回 |
 | FEX | FEX-2610 加 Highball `fex/patches` 0001–0033，unix 端是 Highball 的 `fexunixlib_darwin.cpp`（每條執行緒都開硬體 TSO）。我們的 0035–0038（以 FBW A380 基準最佳化，說明在 fork 的 `runtime/fex/highball/README.md`）11/4 裝進模擬器用的 runtime 和模擬器 prefix；0037 由 MSFS 配方對 `\wasm\msfs2024\` 開；0039（入口不再存區塊 header，MD-11 回放 −6% 週期）11/4 傍晚也裝進去了；0040（區塊失效時入口改成交回 dispatcher，修掉 JSC 開 JIT 時偶爾跑到改寫前的翻譯而崩潰，`SQUARK_FEX_STALE_EXIT=0` 關掉）11/5 裝進去 |
 | 圖形 | KosmicKrisp（Mesa `ce576c29ed` 加 fxgl/steamac v1.9.7 的 0001–0077，再加 [`patches/kk/`](patches/kk/)）；vkd3d-proton `21a49c97`（v3.0b）、DXVK `3cb664e1`（v2.6.2-23）加 [`patches/vkd3d-proton/`](patches/vkd3d-proton/)、[`patches/dxvk/`](patches/dxvk/)，編成 ARM64EC |
 | 其他 | GStreamer 1.28.7（官方 framework，用 Highball 的腳本精簡；沒有它開始畫面會一直黑） |
 | MSFS 2024 | Steam AppID 2537590，1.9.21.0 |
 
-Wine runtime 的 patch、編法和 Hadron 本身的改動都在 fork 裡（`runtime/patches/wine-11.18-fex/`、`runtime/fex/highball/`、`runtime/gstreamer/`、`runtime/build-wine.sh`、`dylib/feats/compat_run.sh`）。Highball 的檔案原樣搬過去、不改原檔，要修就加新編號的 patch。這個 repo 的 `tools/hadron/build-runtime.sh` 呼叫 fork 的 `build-wine.sh`，把 KosmicKrisp 和 ARM64EC 的 vkd3d-proton、DXVK 一起帶進 runtime。
+Wine runtime 的 patch、編法和 Hadron 本身的改動都在 fork 裡（`runtime/patches/wine-11.21-highball/`，11.18 那份是 `wine-11.18-fex/`；`runtime/fex/highball/`、`runtime/gstreamer/`、`runtime/build-wine.sh`、`dylib/feats/compat_run.sh`）。Highball 的檔案原樣搬過去、不改原檔，要修就加新編號的 patch。這個 repo 的 `tools/hadron/build-runtime.sh` 呼叫 fork 的 `build-wine.sh`，把 KosmicKrisp 和 ARM64EC 的 vkd3d-proton、DXVK 一起帶進 runtime。
 
 Wine 的 loader 是 runtime 裡的 `Wine.app`，要有 Cross-architecture Compatibility Framework 權限才能在 arm64 上跑 x86 程式碼：Apple Developer 網站上建一個勾了這項的 App ID，`xcodebuild -allowProvisioningUpdates` 就會產生描述檔（Xcode 不會替這項權限自己註冊 App ID）。
 
-## 我們的 Wine patch（fork 的 `runtime/patches/wine-11.18-fex/`）
+## 我們的 Wine patch（fork 的 `runtime/patches/wine-11.21-highball/`，`wine-11.18-fex/` 同號）
 
 | patch | 內容 |
 |---|---|
@@ -53,6 +54,9 @@ Wine 的 loader 是 runtime 裡的 `Wine.app`，要有 Cross-architecture Compat
 | 0058 | schannel 找伺服器憑證的 CAPI 私鑰時，HKCU 找不到再找 HKLM（.NET 的 `MachineKeySet`） |
 | 0059 | `SQUARK_FAKEPAD=<FIFO 路徑>`（或 prefix 裡有 `squark-fakepad` 這個 FIFO）時，winebus 的 SDL 匯流排多掛一支模擬手把（045e:02fd），從 FIFO 讀文字指令。沒有實體手把時測試輸入、背景操作用 |
 | 0060 | winemac 的 `OnMainThread` 在主執行緒上就直接執行。主執行緒在 `viewWillDraw` 更新 OpenGL context 時排隊等自己，整個程式卡死（TFDi MD-11 的 Install Manager，WPF 走 d3d9→wined3d OpenGL）。上游 master 還是一樣 |
+| 0061 | 執行中才打開的等待紀錄器：prefix 裡有 `squark-waitlog` 時，寫一個 `ctl` 檔就記下幾秒內每條執行緒的等待（wineserver 的等待和叫醒它的執行緒、critical section、SRW lock、condition variable、WaitOnAddress、sleep、yield），時間到才寫出來。關著時每次等待只多一次讀取 |
+| 0062 | thread pool 的 timer queue 執行緒在沒有相對 timer 時一直等，不再空轉。修前模擬器 10 秒等了 22.7 萬次，吃掉三分之一個核心，wineserver 另外再陪一份 |
+| 0063 | `WINEDEBUG=+tptimer` 記下 thread pool timer 的設定和 timer queue 執行緒每秒跑幾輪，平常關著 |
 
 ## 圖形與啟動選項
 
